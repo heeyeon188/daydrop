@@ -5,19 +5,21 @@ import { supabase } from '@/lib/supabase';
 
 const BUCKET = 'daydrop-photos';
 
+const imagePickerOptions: ImagePicker.ImagePickerOptions = {
+  mediaTypes: ['images'],
+  allowsEditing: true,
+  aspect: [4, 5],
+  quality: 0.86,
+  base64: true,
+};
+
 export async function pickImageFromLibrary() {
   const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
   if (!permission.granted) {
-    throw new Error('사진 보관함 접근 권한이 필요해요.');
+    throw new Error('photo_permission_denied');
   }
 
-  const result = await ImagePicker.launchImageLibraryAsync({
-    mediaTypes: ['images'],
-    allowsEditing: true,
-    aspect: [4, 5],
-    quality: 0.86,
-    base64: true,
-  });
+  const result = await ImagePicker.launchImageLibraryAsync(imagePickerOptions);
 
   if (result.canceled) {
     return null;
@@ -25,7 +27,27 @@ export async function pickImageFromLibrary() {
 
   const asset = result.assets[0];
   if (!asset?.base64) {
-    throw new Error('이미지를 읽지 못했어요. 다시 선택해주세요.');
+    throw new Error('photo_read_failed');
+  }
+
+  return asset;
+}
+
+export async function takePhotoWithCamera() {
+  const permission = await ImagePicker.requestCameraPermissionsAsync();
+  if (!permission.granted) {
+    throw new Error('photo_permission_denied');
+  }
+
+  const result = await ImagePicker.launchCameraAsync(imagePickerOptions);
+
+  if (result.canceled) {
+    return null;
+  }
+
+  const asset = result.assets[0];
+  if (!asset?.base64) {
+    throw new Error('photo_read_failed');
   }
 
   return asset;
@@ -45,12 +67,10 @@ export async function uploadDropImage({
   const timestamp = Date.now();
   const storagePath = `couples/${coupleId}/drops/${dropId}/${userId}-${timestamp}.jpg`;
 
-  const { error } = await supabase.storage
-    .from(BUCKET)
-    .upload(storagePath, decode(base64), {
-      contentType: 'image/jpeg',
-      upsert: false,
-    });
+  const { error } = await supabase.storage.from(BUCKET).upload(storagePath, decode(base64), {
+    contentType: 'image/jpeg',
+    upsert: false,
+  });
 
   if (error) {
     throw error;

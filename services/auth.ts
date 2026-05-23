@@ -14,15 +14,6 @@ export async function signUpWithEmail(email: string, password: string) {
     throw error;
   }
 
-  if (data.user) {
-    await supabase.from('profiles').upsert({
-      id: data.user.id,
-      display_name: email.split('@')[0],
-      city: 'Seoul',
-      timezone: 'Asia/Seoul',
-    });
-  }
-
   return data;
 }
 

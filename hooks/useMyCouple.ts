@@ -18,7 +18,7 @@ export function useMyCouple(enabled: boolean) {
     try {
       setCouple(await getMyCouple());
     } catch (nextError) {
-      setError(nextError instanceof Error ? nextError.message : '커플 정보를 불러오지 못했어요.');
+      setError(nextError instanceof Error ? nextError.message : 'Could not load couple details.');
     } finally {
       setLoading(false);
     }

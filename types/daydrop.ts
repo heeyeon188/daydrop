@@ -7,8 +7,11 @@ export type AuthUser = User;
 export type Profile = {
   id: string;
   display_name: string | null;
+  country: string | null;
   city: string | null;
   timezone: string | null;
+  preferred_language: 'ko' | 'en' | null;
+  profile_completed: boolean | null;
   created_at: string;
   updated_at: string;
 };
@@ -28,6 +31,8 @@ export type CoupleMember = {
   couple_id: string;
   user_id: string;
   role: 'owner' | 'partner';
+  display_name: string | null;
+  country: string | null;
   city: string | null;
   timezone: string | null;
   created_at: string;
@@ -72,6 +77,6 @@ export type TodayDropPayload = {
 };
 
 export type RecentDrop = DailyDrop & {
-  mission: Pick<Mission, 'prompt_ko'> | null;
+  mission: Pick<Mission, 'prompt_ko' | 'prompt_en'> | null;
   drop_submissions: DropSubmission[];
 };

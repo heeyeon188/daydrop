@@ -4,6 +4,11 @@ import { supabase } from '@/lib/supabase';
 import { getOrCreateTodayDrop, getRecentDrops } from '@/services/drops';
 import type { RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
+type RefetchResult = {
+  recentDrops: RecentDrop[];
+  today: TodayDropPayload;
+} | null;
+
 export function useTodayDrop(coupleId: string | null) {
   const [today, setToday] = React.useState<TodayDropPayload | null>(null);
   const [recentDrops, setRecentDrops] = React.useState<RecentDrop[]>([]);
@@ -12,11 +17,11 @@ export function useTodayDrop(coupleId: string | null) {
   const [error, setError] = React.useState<string | null>(null);
 
   const refetch = React.useCallback(
-    async (isRefresh = false) => {
+    async (isRefresh = false): Promise<RefetchResult> => {
       if (!coupleId) {
         setToday(null);
         setRecentDrops([]);
-        return;
+        return null;
       }
 
       if (isRefresh) {
@@ -28,10 +33,22 @@ export function useTodayDrop(coupleId: string | null) {
 
       try {
         const nextToday = await getOrCreateTodayDrop();
+        const nextRecentDrops = await getRecentDrops(nextToday.daily_drop.couple_id);
         setToday(nextToday);
-        setRecentDrops(await getRecentDrops(nextToday.daily_drop.couple_id));
+        setRecentDrops(nextRecentDrops);
+        return {
+          recentDrops: nextRecentDrops,
+          today: nextToday,
+        };
       } catch (nextError) {
-        setError(nextError instanceof Error ? nextError.message : '오늘의 Drop을 불러오지 못했어요.');
+        const message =
+          nextError instanceof Error
+            ? nextError.message
+            : typeof nextError === 'object' && nextError !== null && 'message' in nextError && typeof nextError.message === 'string'
+              ? nextError.message
+              : 'Could not load today\'s Drop.';
+        setError(message);
+        return null;
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -41,7 +58,7 @@ export function useTodayDrop(coupleId: string | null) {
   );
 
   React.useEffect(() => {
-    refetch();
+    void refetch();
   }, [refetch]);
 
   React.useEffect(() => {
@@ -60,7 +77,7 @@ export function useTodayDrop(coupleId: string | null) {
           filter: `couple_id=eq.${coupleId}`,
         },
         () => {
-          refetch(true);
+          void refetch(true);
         }
       )
       .subscribe();

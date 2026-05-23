@@ -17,34 +17,34 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { displayDayCount } from '@/lib/dayCount';
+import { getTranslations, normalizeLanguage, type Language } from '@/lib/i18n';
 import { useMyCouple } from '@/hooks/useMyCouple';
+import { useProfile } from '@/hooks/useProfile';
 import { useSession } from '@/hooks/useSession';
 import { useTodayDrop } from '@/hooks/useTodayDrop';
 import { signInWithEmail, signOut, signUpWithEmail } from '@/services/auth';
-import { createCoupleInvite, joinCoupleByInviteCode } from '@/services/couple';
-import { submitDropPhoto } from '@/services/drops';
+import { createCoupleInvite, joinCoupleByInviteCode, type MyCouple } from '@/services/couple';
+import { deleteMyTodayDropPhoto, submitDropPhoto } from '@/services/drops';
 import { registerPushToken } from '@/services/notifications';
-import { pickImageFromLibrary } from '@/services/storage';
-import type { CoupleMember, DropState, DropSubmission, RecentDrop, TodayDropPayload } from '@/types/daydrop';
+import { completeProfile, updatePreferredLanguage, type ProfileInput } from '@/services/profile';
+import { pickImageFromLibrary, takePhotoWithCamera } from '@/services/storage';
+import type { CoupleMember, DropState, DropSubmission, Profile, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
-const DEFAULT_CITY_PAIR = ['Seoul', 'New York'];
 const MOSAIC_BLOCKS = Array.from({ length: 28 }, (_, index) => index);
 
-type FullImage = {
-  image?: string;
-  label: 'Him' | 'Me';
-  mission: string;
-};
-
-type DropDetail = {
-  drop: RecentDrop;
-  state: DropState;
-};
+type Copy = ReturnType<typeof getTranslations>;
+type FullImage = { canDelete?: boolean; image?: string; label: string; mission: string };
+type DropDetail = { drop: RecentDrop; state: DropState };
 
 export default function MissionScreen() {
   const { user, loading: sessionLoading, configError } = useSession();
+  const profileState = useProfile(user?.id);
   const myCouple = useMyCouple(Boolean(user));
+  const language = normalizeLanguage(profileState.profile?.preferred_language);
+  const t = getTranslations(language);
 
   React.useEffect(() => {
     if (user) {
@@ -53,7 +53,7 @@ export default function MissionScreen() {
   }, [user]);
 
   if (sessionLoading) {
-    return <CenteredState text="Daydrop을 준비하는 중이에요." />;
+    return <CenteredState text={t.loadingApp} />;
   }
 
   if (configError) {
@@ -61,20 +61,36 @@ export default function MissionScreen() {
   }
 
   if (!user) {
-    return <AuthScreen />;
+    return <AuthScreen language={language} />;
   }
 
-  if (myCouple.loading) {
-    return <CenteredState text="커플 정보를 불러오는 중이에요." />;
+  if (profileState.loading || (myCouple.loading && profileState.profile?.profile_completed)) {
+    return <CenteredState text={profileState.loading ? t.loadingApp : t.coupleLoading} />;
+  }
+
+  if (!profileState.profile?.profile_completed) {
+    return (
+      <ProfileSetupScreen
+        language={language}
+        onLogout={signOut}
+        onSaved={async (profile) => {
+          profileState.setProfile(profile);
+          await myCouple.refetch();
+        }}
+        profile={profileState.profile}
+      />
+    );
   }
 
   if (!myCouple.couple) {
     return (
       <CoupleConnectScreen
+        language={language}
         inviteCode={null}
-        pending={false}
         onConnected={myCouple.refetch}
         onLogout={signOut}
+        pending={false}
+        profile={profileState.profile}
       />
     );
   }
@@ -85,62 +101,81 @@ export default function MissionScreen() {
   if (!coupleReady) {
     return (
       <CoupleConnectScreen
+        language={language}
         inviteCode={couple.invite_code}
-        pending
         onConnected={myCouple.refetch}
         onLogout={signOut}
+        pending
+        profile={profileState.profile}
       />
     );
   }
 
   return (
     <MissionContent
-      coupleId={couple.id}
-      coupleStatus={couple.status}
+      language={language}
+      myCouple={myCouple.couple}
       myEmail={user.email ?? 'No email'}
       myUserId={user.id}
+      onLanguageChanged={profileState.setProfile}
       onLogout={signOut}
+      onProfileSaved={async (profile) => {
+        profileState.setProfile(profile);
+        await myCouple.refetch();
+      }}
+      profile={profileState.profile}
     />
   );
 }
 
 function MissionContent({
-  coupleId,
-  coupleStatus,
+  language,
+  myCouple,
   myEmail,
   myUserId,
+  onLanguageChanged,
   onLogout,
+  onProfileSaved,
+  profile,
 }: {
-  coupleId: string;
-  coupleStatus: 'pending' | 'active';
+  language: Language;
+  myCouple: MyCouple;
   myEmail: string;
   myUserId: string;
+  onLanguageChanged: (profile: Profile) => void;
   onLogout: () => Promise<void>;
+  onProfileSaved: (profile: Profile) => Promise<void>;
+  profile: Profile;
 }) {
-  const { today, recentDrops, loading, refreshing, error, refetch } = useTodayDrop(coupleId);
+  const t = getTranslations(language);
+  const { today, recentDrops, loading, refreshing, error, refetch } = useTodayDrop(myCouple.couple.id);
+  const [deletingPhoto, setDeletingPhoto] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const [fullImage, setFullImage] = React.useState<FullImage | null>(null);
   const [allDropsVisible, setAllDropsVisible] = React.useState(false);
   const [dropDetail, setDropDetail] = React.useState<DropDetail | null>(null);
-  const [profileVisible, setProfileVisible] = React.useState(false);
-
+  const [settingsVisible, setSettingsVisible] = React.useState(false);
+  const members = splitMembers(today?.members ?? myCouple.members, myUserId);
   const state = getDropState(today, myUserId);
-  const stateCopy = getStateCopy(state);
-  const meta = today ? buildMeta(today.members, today.daily_drop.day_count) : 'Seoul <-> New York';
-  const missionTitle = today?.mission.prompt_ko ?? "Today's Mission";
+  const stateCopy = getStateCopy(state, t);
+  const dayLabel = today
+    ? displayDayCount(today.daily_drop.day_count, today.couple.relationship_start_date, today.daily_drop.drop_date)
+    : displayDayCount(null, myCouple.couple.relationship_start_date);
+  const meta = buildMeta(members, dayLabel, t);
+  const missionTitle = getMissionPrompt(today?.mission, language);
 
-  const handleUpload = async () => {
-    if (!today || state === 'meOnly' || state === 'both' || uploading) {
+  const uploadPickedPhoto = async (picker: () => ReturnType<typeof pickImageFromLibrary>) => {
+    if (!today || state === 'meOnly' || state === 'both' || uploading || deletingPhoto) {
       return;
     }
 
     try {
-      const picked = await pickImageFromLibrary();
+      setUploading(true);
+      const picked = await picker();
       if (!picked) {
         return;
       }
 
-      setUploading(true);
       await submitDropPhoto({
         base64: picked.base64 ?? '',
         coupleId: today.daily_drop.couple_id,
@@ -149,18 +184,84 @@ function MissionContent({
       });
       await refetch(true);
     } catch (nextError) {
-      Alert.alert('업로드 실패', nextError instanceof Error ? nextError.message : '사진을 올리지 못했어요.');
+      const message = nextError instanceof Error ? nextError.message : '';
+      Alert.alert(
+        t.uploadError,
+        message === 'photo_permission_denied' ? t.photoPermission : message === 'photo_read_failed' ? t.photoReadError : message || t.photoReadError
+      );
     } finally {
       setUploading(false);
     }
   };
 
+  const handleUpload = () => {
+    if (deletingPhoto) {
+      return;
+    }
+
+    Alert.alert(t.pickPhotoTitle, undefined, [
+      { text: t.camera, onPress: () => uploadPickedPhoto(takePhotoWithCamera) },
+      { text: t.album, onPress: () => uploadPickedPhoto(pickImageFromLibrary) },
+      { text: t.cancel, style: 'cancel' },
+    ]);
+  };
+
+  const handleDeleteMyPhoto = async () => {
+    if (!today || deletingPhoto) {
+      return;
+    }
+
+    try {
+      setDeletingPhoto(true);
+      await deleteMyTodayDropPhoto({
+        currentDropId: today.daily_drop.id,
+        currentUserId: myUserId,
+      });
+      setFullImage(null);
+      const refetchResult = await refetch(true);
+      console.log(
+        'refetch result',
+        refetchResult
+          ? {
+              currentState: getDropState(refetchResult.today, myUserId),
+              currentSubmissionCount: refetchResult.today.submissions.length,
+              dropId: refetchResult.today.daily_drop.id,
+            }
+          : null
+      );
+    } catch (nextError) {
+      console.error('deleteMyTodayDropPhoto failed', nextError);
+      console.log('refetch result', 'skipped because delete failed');
+      const message = getErrorMessage(nextError);
+      Alert.alert(t.deletePhotoError, message || t.unknownError);
+    } finally {
+      setDeletingPhoto(false);
+    }
+  };
+
+  const confirmDeleteMyPhoto = () => {
+    if (!today || deletingPhoto) {
+      return;
+    }
+
+    Alert.alert(t.deletePhotoTitle, t.deletePhotoBody, [
+      { text: t.cancel, style: 'cancel' },
+      {
+        text: t.deletePhoto,
+        style: 'destructive',
+        onPress: () => {
+          void handleDeleteMyPhoto();
+        },
+      },
+    ]);
+  };
+
   const openLockedPartner = () => {
-    Alert.alert('잠긴 Drop', '내 하루를 보내면 함께 열 수 있어요.');
+    Alert.alert(t.dropLocked, t.openAfterSend);
   };
 
   if (loading && !today) {
-    return <CenteredState text="오늘의 Mission을 불러오는 중이에요." />;
+    return <CenteredState text={t.loadingMission} />;
   }
 
   return (
@@ -169,10 +270,10 @@ function MissionContent({
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => refetch(true)} />}
         contentContainerStyle={styles.scrollContent}>
-        <Header onMenuPress={() => setProfileVisible(true)} />
+        <Header onMenuPress={() => setSettingsVisible(true)} />
 
         <Text allowFontScaling={false} style={styles.sectionTitle}>
-          Mission
+          {t.mission}
         </Text>
 
         {error ? <InlineMessage text={error} /> : null}
@@ -181,21 +282,25 @@ function MissionContent({
           <>
             <View style={styles.missionCard}>
               <Text allowFontScaling={false} style={styles.dropLabel}>
-                {"Today's Drop"}
+                {t.todayDrop}
               </Text>
               <Text allowFontScaling={false} style={styles.missionTitle}>
                 {missionTitle}
               </Text>
-              <Text allowFontScaling={false} style={styles.missionMeta}>
+              <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.missionMeta}>
                 {meta}
               </Text>
               <View style={styles.photoPair}>
                 <TodayDropPair
+                  language={language}
+                  members={members}
                   myUserId={myUserId}
                   onLockedPartnerPress={openLockedPartner}
                   onOpenImage={setFullImage}
                   onUploadPress={handleUpload}
+                  deletingPhoto={deletingPhoto}
                   state={state}
+                  t={t}
                   today={today}
                 />
               </View>
@@ -206,35 +311,29 @@ function MissionContent({
             </Text>
 
             <Pressable
-              disabled={state === 'meOnly' || state === 'both' || uploading}
+              disabled={state === 'meOnly' || state === 'both' || uploading || deletingPhoto}
               onPress={handleUpload}
-              style={[styles.primaryButton, (state === 'meOnly' || state === 'both' || uploading) && styles.disabledButton]}>
+              style={[styles.primaryButton, (state === 'meOnly' || state === 'both' || uploading || deletingPhoto) && styles.disabledButton]}>
               {uploading ? (
                 <ActivityIndicator color="#FFFFFF" />
               ) : (
                 <Text
                   allowFontScaling={false}
-                  style={[styles.primaryButtonText, (state === 'meOnly' || state === 'both') && styles.disabledButtonText]}>
+                  style={[styles.primaryButtonText, (state === 'meOnly' || state === 'both' || deletingPhoto) && styles.disabledButtonText]}>
                   {stateCopy.button}
                 </Text>
               )}
             </Pressable>
-
-            {stateCopy.secondary ? (
-              <Text allowFontScaling={false} style={styles.secondaryAction}>
-                {stateCopy.secondary}
-              </Text>
-            ) : null}
           </>
         ) : null}
 
         <View style={styles.recentHeader}>
           <Text allowFontScaling={false} style={styles.recentTitle}>
-            Recent Drops
+            {t.recentDrops}
           </Text>
           <Pressable style={styles.viewAll} onPress={() => setAllDropsVisible(true)}>
             <Text allowFontScaling={false} style={styles.viewAllText}>
-              모두 보기
+              {t.viewAll}
             </Text>
             <Feather name="chevron-right" size={20} color="#111111" />
           </Pressable>
@@ -242,13 +341,15 @@ function MissionContent({
 
         <View style={styles.recentList}>
           {recentDrops.length === 0 ? (
-            <InlineMessage text="아직 지난 Drop이 없어요." />
+            <InlineMessage text={t.noRecentDrops} />
           ) : (
             recentDrops.map((drop) => (
               <RecentDropRow
                 key={drop.id}
                 drop={drop}
+                language={language}
                 myUserId={myUserId}
+                relationshipStartDate={today?.couple.relationship_start_date ?? myCouple.couple.relationship_start_date}
                 onPress={() => setDropDetail({ drop, state: getRecentDropState(drop, myUserId) })}
               />
             ))
@@ -256,24 +357,42 @@ function MissionContent({
         </View>
       </ScrollView>
 
-      <FullImageModal image={fullImage} onClose={() => setFullImage(null)} />
+      <FullImageModal
+        deleting={deletingPhoto}
+        image={fullImage}
+        onClose={() => setFullImage(null)}
+        onDeletePress={confirmDeleteMyPhoto}
+        t={t}
+      />
       <AllDropsModal
         drops={recentDrops}
+        language={language}
         myUserId={myUserId}
+        relationshipStartDate={today?.couple.relationship_start_date ?? myCouple.couple.relationship_start_date}
+        t={t}
         onClose={() => setAllDropsVisible(false)}
         onOpenDrop={(drop) => setDropDetail({ drop, state: getRecentDropState(drop, myUserId) })}
         visible={allDropsVisible}
       />
-      <DropDetailModal detail={dropDetail} myUserId={myUserId} onClose={() => setDropDetail(null)} />
-      <ProfileSheet
-        coupleId={coupleId}
-        coupleStatus={coupleStatus}
+      <DropDetailModal
+        detail={dropDetail}
+        language={language}
+        myUserId={myUserId}
+        relationshipStartDate={today?.couple.relationship_start_date ?? myCouple.couple.relationship_start_date}
+        t={t}
+        onClose={() => setDropDetail(null)}
+      />
+      <SettingsSheet
+        couple={myCouple}
         email={myEmail}
-        todayDate={today?.daily_drop.drop_date}
-        userId={myUserId}
-        visible={profileVisible}
-        onClose={() => setProfileVisible(false)}
+        language={language}
+        profile={profile}
+        t={t}
+        visible={settingsVisible}
+        onClose={() => setSettingsVisible(false)}
+        onLanguageChanged={onLanguageChanged}
         onLogout={onLogout}
+        onProfileSaved={onProfileSaved}
       />
     </SafeAreaView>
   );
@@ -296,29 +415,50 @@ function Header({ onMenuPress }: { onMenuPress: () => void }) {
 }
 
 function TodayDropPair({
+  deletingPhoto,
+  language,
+  members,
   myUserId,
   onLockedPartnerPress,
   onOpenImage,
   onUploadPress,
   state,
+  t,
   today,
 }: {
+  deletingPhoto: boolean;
+  language: Language;
+  members: SplitMembers;
   myUserId: string;
   onLockedPartnerPress: () => void;
   onOpenImage: (image: FullImage) => void;
   onUploadPress: () => void;
   state: DropState;
+  t: Copy;
   today: TodayDropPayload;
 }) {
   const mine = today.submissions.find((submission) => submission.user_id === myUserId);
   const partner = today.submissions.find((submission) => submission.user_id !== myUserId);
-  const mission = today.mission.prompt_ko;
+  const myLabel = displayMemberName(members.me, t.me);
+  const partnerLabel = displayMemberName(members.partner, t.partner);
+  const mission = getMissionPrompt(today.mission, language);
 
   if (state === 'both') {
     return (
       <>
-        <PhotoSlot image={partner?.image_url} label="Him" side="left" onPress={() => onOpenImage({ image: partner?.image_url, label: 'Him', mission })} />
-        <PhotoSlot image={mine?.image_url} label="Me" side="right" onPress={() => onOpenImage({ image: mine?.image_url, label: 'Me', mission })} />
+        <PhotoSlot
+          image={partner?.image_url}
+          label={partnerLabel}
+          side="left"
+          onPress={() => onOpenImage({ canDelete: false, image: partner?.image_url, label: partnerLabel, mission })}
+        />
+        <EditablePhotoSlot
+          deleting={deletingPhoto}
+          image={mine?.image_url}
+          label={myLabel}
+          onOpenImage={() => onOpenImage({ canDelete: true, image: mine?.image_url, label: myLabel, mission })}
+          side="right"
+        />
       </>
     );
   }
@@ -326,8 +466,14 @@ function TodayDropPair({
   if (state === 'meOnly') {
     return (
       <>
-        <WaitingSlot />
-        <PhotoSlot image={mine?.image_url} label="Me" side="right" onPress={() => onOpenImage({ image: mine?.image_url, label: 'Me', mission })} />
+        <WaitingSlot label={partnerLabel} t={t} />
+        <EditablePhotoSlot
+          deleting={deletingPhoto}
+          image={mine?.image_url}
+          label={myLabel}
+          onOpenImage={() => onOpenImage({ canDelete: true, image: mine?.image_url, label: myLabel, mission })}
+          side="right"
+        />
       </>
     );
   }
@@ -335,23 +481,22 @@ function TodayDropPair({
   if (state === 'partnerOnly') {
     return (
       <>
-        <LockedPhotoSlot image={partner?.image_url} label="Him" onPress={onLockedPartnerPress} />
-        <SendSlot onPress={onUploadPress} />
+        <LockedPhotoSlot image={partner?.image_url} label={partnerLabel} onPress={onLockedPartnerPress} t={t} />
+        <SendSlot label={myLabel} onPress={onUploadPress} t={t} />
       </>
     );
   }
 
   return (
     <>
-      <EmptySlot label="Him" icon="upload-cloud" message="아직 보내지 않았어요" tone="blue" side="left" />
-      <EmptySlot label="Me" icon="camera" message="눌러서 사진 보내기" tone="sand" side="right" onPress={onUploadPress} />
+      <EmptySlot label={partnerLabel} icon="upload-cloud" message={language === 'ko' ? '아직 보내지 않았어요' : 'Not sent yet'} tone="blue" side="left" />
+      <EmptySlot label={myLabel} icon="camera" message={language === 'ko' ? '눌러서 사진 보내기' : 'Tap to send a photo'} tone="sand" side="right" onPress={onUploadPress} />
     </>
   );
 }
 
 function getDropState(today: TodayDropPayload | null, myUserId: string): DropState {
-  const submissions = today?.submissions ?? [];
-  return getSubmissionState(submissions, myUserId);
+  return getSubmissionState(today?.submissions ?? [], myUserId);
 }
 
 function getRecentDropState(drop: RecentDrop, myUserId: string): DropState {
@@ -362,40 +507,30 @@ function getSubmissionState(submissions: DropSubmission[], myUserId: string): Dr
   const mine = submissions.some((submission) => submission.user_id === myUserId);
   const partner = submissions.some((submission) => submission.user_id !== myUserId);
 
-  if (mine && partner) {
-    return 'both';
-  }
-  if (mine) {
-    return 'meOnly';
-  }
-  if (partner) {
-    return 'partnerOnly';
-  }
+  if (mine && partner) return 'both';
+  if (mine) return 'meOnly';
+  if (partner) return 'partnerOnly';
   return 'none';
 }
 
-function getStateCopy(state: DropState) {
+function getStateCopy(state: DropState, t: Copy) {
   switch (state) {
     case 'both':
-      return {
-        message: '오늘의 우리가 열렸어요.\n서로의 하루를 함께 볼 수 있어요.',
-        button: '오늘의 카드 열림',
-      };
+      return { message: t.todayOpen, button: t.todayOpen };
     case 'meOnly':
       return {
-        message: '내 하루를 보냈어요.\n상대의 Daydrop을 기다리는 중이에요.',
-        button: '보내기 완료',
+        message: t.waitingPartner,
+        button: t.sendDone,
       };
     case 'partnerOnly':
       return {
-        message: '상대가 오늘의 사진을 보냈어요.\n당신의 하루를 보내면 함께 열 수 있어요.',
-        button: '내 하루 보내고 함께 열기',
+        message: `${t.partnerSent}\n${t.openAfterSend}`,
+        button: t.sendMine,
       };
     default:
       return {
-        message: '아직 아무도 오늘의 사진을 보내지 않았어요.\n먼저 하루를 보내고 오늘의 카드를 시작해보세요.',
-        button: '오늘의 사진 보내기',
-        secondary: '나중에 할게요',
+        message: t.openAfterSend,
+        button: t.uploadPhoto,
       };
   }
 }
@@ -419,78 +554,95 @@ function EmptySlot({
   const toneColor = tone === 'blue' ? '#7890AE' : '#9B8D77';
 
   return (
-    <Pressable disabled={!onPress} onPress={onPress} style={[styles.dropSlot, styles.dashedSlot, toneStyle, sideRadius(side)]}>
-      <Feather name={icon} size={38} color={toneColor} strokeWidth={1.75} />
-      <Text allowFontScaling={false} style={styles.emptyLabel}>
-        {label}
-      </Text>
+    <Pressable disabled={!onPress} onPress={onPress} style={[styles.dropSlot, toneStyle, sideRadius(side)]}>
+      <Feather name={icon} size={30} color={toneColor} strokeWidth={1.6} />
       <Text allowFontScaling={false} style={styles.emptyMessage}>
         {message}
+      </Text>
+      <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.bottomLabelMuted}>
+        {label}
       </Text>
     </Pressable>
   );
 }
 
-function WaitingSlot() {
+function WaitingSlot({ label, t }: { label: string; t: Copy }) {
   return (
-    <View style={[styles.dropSlot, styles.dashedSlot, styles.waitingSlot, sideRadius('left')]}>
+    <View style={[styles.dropSlot, styles.waitingSlot, sideRadius('left')]}>
       <View style={styles.waitingContent}>
         <Feather name="refresh-cw" size={40} color="#858585" strokeWidth={1.65} />
         <Text allowFontScaling={false} style={styles.waitingText}>
-          상대가 보내는 중...
+          {t.waitingPartner}
         </Text>
       </View>
-      <Text allowFontScaling={false} style={styles.bottomLabelMuted}>
-        Him
+      <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.bottomLabelMuted}>
+        {label}
       </Text>
     </View>
   );
 }
 
-function PhotoSlot({ image, label, onPress, side }: { image?: string; label: 'Him' | 'Me'; onPress: () => void; side: 'left' | 'right' }) {
+function PhotoSlot({ image, label, onPress, side }: { image?: string; label: string; onPress: () => void; side: 'left' | 'right' }) {
   return (
     <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius(side)]}>
       <SafeImage image={image} label={label} />
-      <Text allowFontScaling={false} style={styles.photoLabel}>
+      <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.photoLabel}>
         {label}
       </Text>
     </Pressable>
   );
 }
 
-function LockedPhotoSlot({ image, label, onPress }: { image?: string; label: 'Him'; onPress: () => void }) {
+function EditablePhotoSlot({
+  deleting,
+  image,
+  label,
+  onOpenImage,
+  side,
+}: {
+  deleting: boolean;
+  image?: string;
+  label: string;
+  onOpenImage: () => void;
+  side: 'left' | 'right';
+}) {
+  return (
+    <Pressable disabled={deleting} onPress={onOpenImage} style={[styles.dropSlot, styles.imageSlot, sideRadius(side)]}>
+      <SafeImage image={image} label={label} />
+      <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.photoLabel}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+function LockedPhotoSlot({ image, label, onPress, t }: { image?: string; label: string; onPress: () => void; t: Copy }) {
   return (
     <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius('left')]}>
-      <SafeImage blurRadius={20} image={image} label={label} />
-      <MosaicOverlay />
-      <View style={styles.lockContent}>
-        <Feather name="lock" size={36} color="#FFFFFF" strokeWidth={2} />
-        <Text allowFontScaling={false} style={styles.lockTitle}>
-          상대가 보냈어요
-        </Text>
-        <Text allowFontScaling={false} style={styles.lockHint}>
-          내 하루를 보내면 열려요
+      <SafeImage blurRadius={24} image={image} label={label} />
+      <View pointerEvents="none" style={styles.partnerLockVeil} />
+      <View style={[styles.lockContent, styles.partnerLockContent]}>
+        <Feather name="lock" size={26} color="#FFFFFF" strokeWidth={2.1} />
+        <Text allowFontScaling={false} numberOfLines={2} style={styles.partnerLockText}>
+          {t.partnerSent}
         </Text>
       </View>
-      <Text allowFontScaling={false} style={styles.photoLabel}>
-        {label}
-      </Text>
     </Pressable>
   );
 }
 
-function SendSlot({ onPress }: { onPress: () => void }) {
+function SendSlot({ label, onPress, t }: { label: string; onPress: () => void; t: Copy }) {
   return (
     <Pressable onPress={onPress} style={[styles.dropSlot, styles.sendSlot, sideRadius('right')]}>
       <View style={styles.innerDashedSlot}>
         <View style={styles.plusCircle}>
-          <Feather name="plus" size={30} color="#FFFFFF" strokeWidth={2.5} />
+          <Feather name="plus" size={22} color="#FFFFFF" strokeWidth={2.2} />
         </View>
         <Text allowFontScaling={false} style={styles.sendText}>
-          내 하루 보내기
+          {t.sendMine}
         </Text>
-        <Text allowFontScaling={false} style={styles.bottomLabelMuted}>
-          Me
+        <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.bottomLabelMuted}>
+          {label}
         </Text>
       </View>
     </Pressable>
@@ -546,10 +698,23 @@ function MosaicOverlay() {
   );
 }
 
-function RecentDropRow({ drop, myUserId, onPress }: { drop: RecentDrop; myUserId: string; onPress: () => void }) {
+function RecentDropRow({
+  drop,
+  language,
+  myUserId,
+  onPress,
+  relationshipStartDate,
+}: {
+  drop: RecentDrop;
+  language: Language;
+  myUserId: string;
+  onPress: () => void;
+  relationshipStartDate?: string | null;
+}) {
   const mine = drop.drop_submissions.find((submission) => submission.user_id === myUserId);
   const partner = drop.drop_submissions.find((submission) => submission.user_id !== myUserId);
   const isOpen = Boolean(mine && partner);
+  const dayLabel = displayDayCount(drop.day_count, relationshipStartDate, drop.drop_date);
 
   return (
     <Pressable onPress={onPress} style={styles.recentRow}>
@@ -559,13 +724,13 @@ function RecentDropRow({ drop, myUserId, onPress }: { drop: RecentDrop; myUserId
       </View>
       <View style={styles.recentInfo}>
         <Text allowFontScaling={false} style={styles.recentDate}>
-          {formatDate(drop.drop_date)}
+          {formatDate(drop.drop_date, language)}
         </Text>
         <Text allowFontScaling={false} numberOfLines={1} style={styles.recentMission}>
-          {drop.mission?.prompt_ko ?? "Today's Mission"}
+          {getMissionPrompt(drop.mission, language)}
         </Text>
         <Text allowFontScaling={false} style={styles.recentMeta}>
-          {drop.day_count ? `D+${drop.day_count}` : 'D+-'}
+          {dayLabel ?? getTranslations(language).dayNotSet}
         </Text>
       </View>
       <Feather name="chevron-right" size={20} color="#777777" />
@@ -589,15 +754,29 @@ function RecentThumb({ image, locked, side }: { image?: string; locked: boolean;
   );
 }
 
-function FullImageModal({ image, onClose }: { image: FullImage | null; onClose: () => void }) {
+function FullImageModal({
+  deleting,
+  image,
+  onClose,
+  onDeletePress,
+  t,
+}: {
+  deleting: boolean;
+  image: FullImage | null;
+  onClose: () => void;
+  onDeletePress: () => void;
+  t: Copy;
+}) {
+  const insets = useSafeAreaInsets();
+
   return (
     <Modal animationType="fade" transparent visible={Boolean(image)} onRequestClose={onClose}>
       <View style={styles.fullModal}>
-        <Pressable hitSlop={12} onPress={onClose} style={styles.closeButton}>
+        <Pressable hitSlop={12} onPress={onClose} style={[styles.closeButton, { top: Math.max(insets.top + 12, 22) }]}>
           <Feather name="x" size={28} color="#FFFFFF" />
         </Pressable>
         {image?.image ? <Image resizeMode="contain" source={{ uri: image.image }} style={styles.fullImage} /> : null}
-        <View style={styles.fullCaption}>
+        <View style={[styles.fullCaption, { bottom: image?.canDelete ? Math.max(insets.bottom + 88, 96) : Math.max(insets.bottom + 26, 42) }]}>
           <Text allowFontScaling={false} style={styles.fullLabel}>
             {image?.label}
           </Text>
@@ -605,22 +784,54 @@ function FullImageModal({ image, onClose }: { image: FullImage | null; onClose: 
             {image?.mission}
           </Text>
         </View>
+        {image?.canDelete ? (
+          <Pressable
+            disabled={deleting}
+            onPress={onDeletePress}
+            style={[styles.fullDeleteButton, { bottom: Math.max(insets.bottom + 18, 26) }, deleting && styles.fullDeleteButtonDisabled]}>
+            {deleting ? (
+              <ActivityIndicator color="#111111" size="small" />
+            ) : (
+              <Text allowFontScaling={false} style={styles.fullDeleteButtonText}>
+                {t.deletePhoto}
+              </Text>
+            )}
+          </Pressable>
+        ) : null}
       </View>
     </Modal>
   );
 }
 
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string') {
+    return error.message;
+  }
+
+  return '';
+}
+
 function AllDropsModal({
   drops,
+  language,
   myUserId,
   onClose,
   onOpenDrop,
+  relationshipStartDate,
+  t,
   visible,
 }: {
   drops: RecentDrop[];
+  language: Language;
   myUserId: string;
   onClose: () => void;
   onOpenDrop: (drop: RecentDrop) => void;
+  relationshipStartDate?: string | null;
+  t: Copy;
   visible: boolean;
 }) {
   return (
@@ -628,7 +839,7 @@ function AllDropsModal({
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.modalHeader}>
           <Text allowFontScaling={false} style={styles.modalTitle}>
-            All Drops
+            {t.allDrops}
           </Text>
           <Pressable hitSlop={12} onPress={onClose}>
             <Feather name="x" size={26} color="#111111" />
@@ -636,13 +847,15 @@ function AllDropsModal({
         </View>
         <ScrollView contentContainerStyle={styles.allDropsContent}>
           {drops.length === 0 ? (
-            <InlineMessage text="아직 볼 수 있는 Drop이 없어요." />
+            <InlineMessage text={t.noDrops} />
           ) : (
             drops.map((drop) => (
               <AllDropRow
                 key={drop.id}
                 drop={drop}
+                language={language}
                 myUserId={myUserId}
+                relationshipStartDate={relationshipStartDate}
                 onPress={() => {
                   onClose();
                   onOpenDrop(drop);
@@ -656,7 +869,19 @@ function AllDropsModal({
   );
 }
 
-function AllDropRow({ drop, myUserId, onPress }: { drop: RecentDrop; myUserId: string; onPress: () => void }) {
+function AllDropRow({
+  drop,
+  language,
+  myUserId,
+  onPress,
+  relationshipStartDate,
+}: {
+  drop: RecentDrop;
+  language: Language;
+  myUserId: string;
+  onPress: () => void;
+  relationshipStartDate?: string | null;
+}) {
   const mine = drop.drop_submissions.find((submission) => submission.user_id === myUserId);
   const partner = drop.drop_submissions.find((submission) => submission.user_id !== myUserId);
   const isOpen = Boolean(mine && partner);
@@ -665,13 +890,13 @@ function AllDropRow({ drop, myUserId, onPress }: { drop: RecentDrop; myUserId: s
     <Pressable onPress={onPress} style={styles.allDropRow}>
       <View style={styles.allDropInfo}>
         <Text allowFontScaling={false} style={styles.recentDate}>
-          {formatDate(drop.drop_date)}
+          {formatDate(drop.drop_date, language)}
         </Text>
         <Text allowFontScaling={false} numberOfLines={1} style={styles.recentMission}>
-          {drop.mission?.prompt_ko ?? "Today's Mission"}
+          {getMissionPrompt(drop.mission, language)}
         </Text>
         <Text allowFontScaling={false} style={styles.recentMeta}>
-          {drop.day_count ? `D+${drop.day_count}` : 'D+-'}
+          {displayDayCount(drop.day_count, relationshipStartDate, drop.drop_date) ?? getTranslations(language).dayNotSet}
         </Text>
       </View>
       <View style={styles.allDropThumbs}>
@@ -682,11 +907,26 @@ function AllDropRow({ drop, myUserId, onPress }: { drop: RecentDrop; myUserId: s
   );
 }
 
-function DropDetailModal({ detail, myUserId, onClose }: { detail: DropDetail | null; myUserId: string; onClose: () => void }) {
+function DropDetailModal({
+  detail,
+  language,
+  myUserId,
+  onClose,
+  relationshipStartDate,
+  t,
+}: {
+  detail: DropDetail | null;
+  language: Language;
+  myUserId: string;
+  onClose: () => void;
+  relationshipStartDate?: string | null;
+  t: Copy;
+}) {
   const drop = detail?.drop;
   const mine = drop?.drop_submissions.find((submission) => submission.user_id === myUserId);
   const partner = drop?.drop_submissions.find((submission) => submission.user_id !== myUserId);
   const isOpen = detail?.state === 'both';
+  const dayLabel = drop ? displayDayCount(drop.day_count, relationshipStartDate, drop.drop_date) : null;
 
   return (
     <Modal animationType="slide" transparent visible={Boolean(detail)} onRequestClose={onClose}>
@@ -696,10 +936,10 @@ function DropDetailModal({ detail, myUserId, onClose }: { detail: DropDetail | n
           <View style={styles.detailHeader}>
             <View style={styles.flex}>
               <Text allowFontScaling={false} style={styles.detailTitle}>
-                {drop?.mission?.prompt_ko ?? "Today's Mission"}
+                {getMissionPrompt(drop?.mission, language)}
               </Text>
               <Text allowFontScaling={false} style={styles.detailMeta}>
-                {drop ? `${formatDate(drop.drop_date)} · ${drop.day_count ? `D+${drop.day_count}` : 'D+-'}` : ''}
+                {drop ? `${formatDate(drop.drop_date, language)} · ${dayLabel ?? t.dayNotSet}` : ''}
               </Text>
             </View>
             <Pressable hitSlop={12} onPress={onClose}>
@@ -707,8 +947,8 @@ function DropDetailModal({ detail, myUserId, onClose }: { detail: DropDetail | n
             </Pressable>
           </View>
           <View style={styles.detailPhotos}>
-            <DetailPhoto image={partner?.image_url} label="Him" locked={!isOpen && Boolean(partner)} />
-            <DetailPhoto image={mine?.image_url} label="Me" locked={!isOpen && Boolean(mine)} />
+            <DetailPhoto image={partner?.image_url} label={t.partner} locked={!isOpen && Boolean(partner)} />
+            <DetailPhoto image={mine?.image_url} label={t.me} locked={!isOpen && Boolean(mine)} />
           </View>
         </View>
       </View>
@@ -716,7 +956,7 @@ function DropDetailModal({ detail, myUserId, onClose }: { detail: DropDetail | n
   );
 }
 
-function DetailPhoto({ image, label, locked }: { image?: string; label: 'Him' | 'Me'; locked: boolean }) {
+function DetailPhoto({ image, label, locked }: { image?: string; label: string; locked: boolean }) {
   return (
     <View style={styles.detailPhoto}>
       {image ? <SafeImage blurRadius={locked ? 16 : 0} image={image} label={`detail-${label}`} /> : <View style={styles.detailPlaceholder} />}
@@ -728,39 +968,60 @@ function DetailPhoto({ image, label, locked }: { image?: string; label: 'Him' | 
           </View>
         </>
       ) : null}
-      <Text allowFontScaling={false} style={styles.photoLabel}>
+      <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.photoLabel}>
         {label}
       </Text>
     </View>
   );
 }
 
-function ProfileSheet({
-  coupleId,
-  coupleStatus,
+function SettingsSheet({
+  couple,
   email,
+  language,
   onClose,
+  onLanguageChanged,
   onLogout,
-  todayDate,
-  userId,
+  onProfileSaved,
+  profile,
+  t,
   visible,
 }: {
-  coupleId: string;
-  coupleStatus: 'pending' | 'active';
+  couple: MyCouple;
   email: string;
+  language: Language;
   onClose: () => void;
+  onLanguageChanged: (profile: Profile) => void;
   onLogout: () => Promise<void>;
-  todayDate?: string;
-  userId: string;
+  onProfileSaved: (profile: Profile) => Promise<void>;
+  profile: Profile;
+  t: Copy;
   visible: boolean;
 }) {
-  const connectionText = coupleStatus === 'active' ? '연결됨' : coupleStatus === 'pending' ? '대기 중' : '연결 안 됨';
+  const [editing, setEditing] = React.useState(false);
+  const [savingLanguage, setSavingLanguage] = React.useState(false);
+  const dayLabel = displayDayCount(null, couple.couple.relationship_start_date);
+  const connectionText = couple.couple.status === 'active' ? t.connected : t.pending;
+
+  const changeLanguage = async (nextLanguage: Language) => {
+    if (nextLanguage === language || savingLanguage) {
+      return;
+    }
+    setSavingLanguage(true);
+    try {
+      onLanguageChanged(await updatePreferredLanguage(nextLanguage));
+    } catch (error) {
+      Alert.alert(t.profileSaveError, error instanceof Error ? error.message : t.photoReadError);
+    } finally {
+      setSavingLanguage(false);
+    }
+  };
 
   const handleLogout = () => {
-    Alert.alert('로그아웃', 'Daydrop에서 로그아웃할까요?', [
-      { text: '취소', style: 'cancel' },
+    Alert.alert(t.logout, t.logoutQuestion, [
+      { text: t.cancel, style: 'cancel' },
       {
-        text: '로그아웃',
+        text: t.logout,
         style: 'destructive',
         onPress: async () => {
           onClose();
@@ -783,20 +1044,61 @@ function ProfileSheet({
               <Feather name="x" size={24} color="#111111" />
             </Pressable>
           </View>
-          <InfoLine label="Email" value={email} />
-          <InfoLine label="User" value={shortId(userId)} />
-          <InfoLine label="Couple" value={connectionText} />
-          <InfoLine label="Couple ID" value={shortId(coupleId)} />
-          <InfoLine label="Mission Date" value={todayDate ?? '-'} />
-          <Pressable onPress={handleLogout} style={styles.logoutButton}>
-            <Feather name="log-out" size={19} color="#FFFFFF" />
-            <Text allowFontScaling={false} style={styles.logoutText}>
-              로그아웃
-            </Text>
-          </Pressable>
+
+          {editing ? (
+            <ProfileForm
+              initialLanguage={language}
+              profile={profile}
+              t={t}
+              onCancel={() => setEditing(false)}
+              onSaved={async (nextProfile) => {
+                await onProfileSaved(nextProfile);
+                setEditing(false);
+              }}
+            />
+          ) : (
+            <>
+              <InfoLine label={t.name} value={profile.display_name ?? '-'} />
+              <InfoLine label={t.email} value={email} />
+              <InfoLine label={`${t.country} / ${t.city}`} value={[profile.city, profile.country].filter(Boolean).join(', ') || '-'} />
+              <InfoLine label={t.timezone} value={profile.timezone ?? '-'} />
+              <InfoLine label={t.couple} value={connectionText} />
+              <InfoLine label={t.relationshipStartDate} value={couple.couple.relationship_start_date ? `${couple.couple.relationship_start_date} · ${dayLabel}` : t.dayNotSet} />
+              <View style={styles.languageRow}>
+                <Text allowFontScaling={false} style={styles.infoLabel}>
+                  {t.language}
+                </Text>
+                <View style={styles.segment}>
+                  <LanguageButton active={language === 'ko'} disabled={savingLanguage} label={t.korean} onPress={() => changeLanguage('ko')} />
+                  <LanguageButton active={language === 'en'} disabled={savingLanguage} label={t.english} onPress={() => changeLanguage('en')} />
+                </View>
+              </View>
+              <Pressable onPress={() => setEditing(true)} style={styles.outlineButton}>
+                <Text allowFontScaling={false} style={styles.outlineButtonText}>
+                  {t.profile}
+                </Text>
+              </Pressable>
+              <Pressable onPress={handleLogout} style={styles.logoutButton}>
+                <Feather name="log-out" size={19} color="#FFFFFF" />
+                <Text allowFontScaling={false} style={styles.logoutText}>
+                  {t.logout}
+                </Text>
+              </Pressable>
+            </>
+          )}
         </Pressable>
       </Pressable>
     </Modal>
+  );
+}
+
+function LanguageButton({ active, disabled, label, onPress }: { active: boolean; disabled: boolean; label: string; onPress: () => void }) {
+  return (
+    <Pressable disabled={disabled} onPress={onPress} style={[styles.segmentButton, active && styles.segmentButtonActive]}>
+      <Text allowFontScaling={false} style={[styles.segmentText, active && styles.segmentTextActive]}>
+        {label}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -813,7 +1115,8 @@ function InfoLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-function AuthScreen() {
+function AuthScreen({ language }: { language: Language }) {
+  const t = getTranslations(language);
   const [mode, setMode] = React.useState<'login' | 'signup'>('login');
   const [email, setEmail] = React.useState('');
   const [password, setPassword] = React.useState('');
@@ -821,7 +1124,7 @@ function AuthScreen() {
 
   const submit = async () => {
     if (!email.trim() || password.length < 6) {
-      Alert.alert('확인해주세요', '이메일과 6자리 이상의 비밀번호가 필요해요.');
+      Alert.alert(t.confirm, language === 'ko' ? '이메일과 6자리 이상의 비밀번호가 필요해요.' : 'Email and a password of at least 6 characters are required.');
       return;
     }
 
@@ -831,10 +1134,10 @@ function AuthScreen() {
         await signInWithEmail(email.trim(), password);
       } else {
         await signUpWithEmail(email.trim(), password);
-        Alert.alert('회원가입 완료', '이메일 확인이 켜져 있다면 인증 후 로그인해주세요.');
+        Alert.alert(t.completeSignup, t.signupPrompt);
       }
     } catch (error) {
-      Alert.alert('Auth 오류', error instanceof Error ? error.message : '다시 시도해주세요.');
+      Alert.alert(t.authError, error instanceof Error ? error.message : t.confirm);
     } finally {
       setLoading(false);
     }
@@ -848,29 +1151,22 @@ function AuthScreen() {
             DAYDROP
           </Text>
           <Text allowFontScaling={false} style={styles.authTitle}>
-            {mode === 'login' ? '로그인' : '회원가입'}
+            {mode === 'login' ? t.login : t.signup}
           </Text>
-          <TextInput
-            autoCapitalize="none"
-            keyboardType="email-address"
-            onChangeText={setEmail}
-            placeholder="email@example.com"
-            style={styles.input}
-            value={email}
-          />
-          <TextInput onChangeText={setPassword} placeholder="password" secureTextEntry style={styles.input} value={password} />
+          <TextInput autoCapitalize="none" keyboardType="email-address" onChangeText={setEmail} placeholder="email@example.com" style={styles.input} value={email} />
+          <TextInput onChangeText={setPassword} placeholder={t.password} secureTextEntry style={styles.input} value={password} />
           <Pressable disabled={loading} onPress={submit} style={[styles.primaryButton, loading && styles.disabledButton]}>
             {loading ? (
               <ActivityIndicator color="#FFFFFF" />
             ) : (
               <Text allowFontScaling={false} style={styles.primaryButtonText}>
-                {mode === 'login' ? '로그인' : '회원가입'}
+                {mode === 'login' ? t.login : t.signup}
               </Text>
             )}
           </Pressable>
           <Pressable onPress={() => setMode(mode === 'login' ? 'signup' : 'login')}>
             <Text allowFontScaling={false} style={styles.secondaryAction}>
-              {mode === 'login' ? '계정 만들기' : '이미 계정이 있어요'}
+              {mode === 'login' ? (language === 'ko' ? '계정 만들기' : 'Create account') : language === 'ko' ? '이미 계정이 있어요' : 'I already have an account'}
             </Text>
           </Pressable>
         </View>
@@ -879,19 +1175,139 @@ function AuthScreen() {
   );
 }
 
+function ProfileSetupScreen({
+  language,
+  onLogout,
+  onSaved,
+  profile,
+}: {
+  language: Language;
+  onLogout: () => Promise<void>;
+  onSaved: (profile: Profile) => Promise<void>;
+  profile: Profile | null;
+}) {
+  const t = getTranslations(language);
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView contentContainerStyle={styles.scrollContent}>
+        <View style={styles.header}>
+          <Text allowFontScaling={false} style={styles.logo}>
+            DAYDROP
+          </Text>
+          <Pressable hitSlop={12} onPress={onLogout}>
+            <Feather name="log-out" size={25} color="#050505" />
+          </Pressable>
+        </View>
+        <Text allowFontScaling={false} style={styles.sectionTitle}>
+          {t.enterProfile}
+        </Text>
+        <View style={styles.missionCard}>
+          <ProfileForm initialLanguage={language} profile={profile} t={t} onSaved={onSaved} />
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+function ProfileForm({
+  initialLanguage,
+  onCancel,
+  onSaved,
+  profile,
+  t,
+}: {
+  initialLanguage: Language;
+  onCancel?: () => void;
+  onSaved: (profile: Profile) => Promise<void>;
+  profile: Profile | null;
+  t: Copy;
+}) {
+  const [displayName, setDisplayName] = React.useState(profile?.display_name ?? '');
+  const [country, setCountry] = React.useState(profile?.country ?? '');
+  const [city, setCity] = React.useState(profile?.city ?? '');
+  const [timezone, setTimezone] = React.useState(profile?.timezone ?? getDeviceTimezone());
+  const [preferredLanguage, setPreferredLanguage] = React.useState<Language>(normalizeLanguage(profile?.preferred_language ?? initialLanguage));
+  const [saving, setSaving] = React.useState(false);
+
+  const save = async () => {
+    if (!displayName.trim() || !country.trim() || !city.trim() || !timezone.trim()) {
+      Alert.alert(t.confirm, `${t.name}, ${t.country}, ${t.city}, ${t.timezone}`);
+      return;
+    }
+
+    const input: ProfileInput = {
+      displayName,
+      country,
+      city,
+      timezone,
+      preferredLanguage,
+    };
+
+    setSaving(true);
+    try {
+      await onSaved(await completeProfile(input));
+    } catch (error) {
+      Alert.alert(t.profileSaveError, error instanceof Error ? error.message : t.confirm);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <View>
+      <TextInput onChangeText={setDisplayName} placeholder={t.name} style={styles.input} value={displayName} />
+      <TextInput onChangeText={setCountry} placeholder={t.country} style={styles.input} value={country} />
+      <TextInput onChangeText={setCity} placeholder={t.city} style={styles.input} value={city} />
+      <TextInput autoCapitalize="none" onChangeText={setTimezone} placeholder={t.timezone} style={styles.input} value={timezone} />
+      <View style={styles.languageRow}>
+        <Text allowFontScaling={false} style={styles.infoLabel}>
+          {t.language}
+        </Text>
+        <View style={styles.segment}>
+          <LanguageButton active={preferredLanguage === 'ko'} disabled={saving} label={t.korean} onPress={() => setPreferredLanguage('ko')} />
+          <LanguageButton active={preferredLanguage === 'en'} disabled={saving} label={t.english} onPress={() => setPreferredLanguage('en')} />
+        </View>
+      </View>
+      <Pressable disabled={saving} onPress={save} style={[styles.primaryButton, saving && styles.disabledButton]}>
+        {saving ? (
+          <ActivityIndicator color="#FFFFFF" />
+        ) : (
+          <Text allowFontScaling={false} style={styles.primaryButtonText}>
+            {t.save}
+          </Text>
+        )}
+      </Pressable>
+      {onCancel ? (
+        <Pressable onPress={onCancel} style={styles.outlineButton}>
+          <Text allowFontScaling={false} style={styles.outlineButtonText}>
+            {t.cancel}
+          </Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
 function CoupleConnectScreen({
   inviteCode,
+  language,
   onConnected,
   onLogout,
   pending,
+  profile,
 }: {
   inviteCode: string | null;
+  language: Language;
   onConnected: () => Promise<void>;
   onLogout: () => Promise<void>;
   pending: boolean;
+  profile: Profile;
 }) {
+  const t = getTranslations(language);
   const [code, setCode] = React.useState('');
   const [createdCode, setCreatedCode] = React.useState(inviteCode);
+  const [relationshipStartDate, setRelationshipStartDate] = React.useState(new Date().toISOString().slice(0, 10));
   const [loading, setLoading] = React.useState(false);
 
   React.useEffect(() => {
@@ -901,11 +1317,11 @@ function CoupleConnectScreen({
   const createInvite = async () => {
     setLoading(true);
     try {
-      const nextCode = await createCoupleInvite();
+      const nextCode = await createCoupleInvite(relationshipStartDate);
       setCreatedCode(nextCode);
       await onConnected();
     } catch (error) {
-      Alert.alert('초대 코드 오류', error instanceof Error ? error.message : '초대 코드를 만들지 못했어요.');
+      Alert.alert(t.inviteCodeError, error instanceof Error ? error.message : t.confirm);
     } finally {
       setLoading(false);
     }
@@ -913,7 +1329,7 @@ function CoupleConnectScreen({
 
   const joinInvite = async () => {
     if (!code.trim()) {
-      Alert.alert('초대 코드', '초대 코드를 입력해주세요.');
+      Alert.alert(t.inviteCode, t.enterInvite);
       return;
     }
 
@@ -922,7 +1338,7 @@ function CoupleConnectScreen({
       await joinCoupleByInviteCode(code);
       await onConnected();
     } catch (error) {
-      Alert.alert('참여 오류', error instanceof Error ? error.message : '초대 코드로 참여하지 못했어요.');
+      Alert.alert(t.joinError, error instanceof Error ? error.message : t.confirm);
     } finally {
       setLoading(false);
     }
@@ -940,47 +1356,57 @@ function CoupleConnectScreen({
           </Pressable>
         </View>
         <Text allowFontScaling={false} style={styles.sectionTitle}>
-          Couple
+          {t.couple}
         </Text>
         <View style={styles.missionCard}>
           <Text allowFontScaling={false} style={styles.dropLabel}>
-            Invite Code
+            {t.inviteCode}
           </Text>
           <Text allowFontScaling={false} style={styles.connectTitle}>
-            둘만의 Daydrop을 시작해보세요.
+            {t.startTogether}
           </Text>
           <Text allowFontScaling={false} style={styles.connectBody}>
-            한 명이 초대 코드를 만들고, 다른 한 명이 그 코드를 입력하면 오늘의 Mission이 열려요.
+            {t.inviteBody}
           </Text>
+          <InfoLine label={t.profile} value={[profile.display_name, profile.city, profile.country].filter(Boolean).join(' · ')} />
 
           {createdCode ? (
             <Pressable
               onPress={async () => {
                 await Clipboard.setStringAsync(createdCode);
-                Alert.alert('복사 완료', '초대 코드가 복사되었어요.');
+                Alert.alert(t.copyDone, t.inviteCode);
               }}
               style={styles.inviteCodeBox}>
               <Text allowFontScaling={false} style={styles.inviteCode}>
                 {createdCode}
               </Text>
               <Text allowFontScaling={false} style={styles.inviteHint}>
-                눌러서 복사
+                {t.copyInvite}
               </Text>
             </Pressable>
           ) : (
-            <Pressable disabled={loading} onPress={createInvite} style={[styles.primaryButton, loading && styles.disabledButton]}>
-              <Text allowFontScaling={false} style={styles.primaryButtonText}>
-                초대 코드 만들기
-              </Text>
-            </Pressable>
+            <>
+              <TextInput
+                autoCapitalize="none"
+                onChangeText={setRelationshipStartDate}
+                placeholder="YYYY-MM-DD"
+                style={styles.input}
+                value={relationshipStartDate}
+              />
+              <Pressable disabled={loading} onPress={createInvite} style={[styles.primaryButton, loading && styles.disabledButton]}>
+                <Text allowFontScaling={false} style={styles.primaryButtonText}>
+                  {t.createInvite}
+                </Text>
+              </Pressable>
+            </>
           )}
 
-          {pending ? <InlineMessage text="상대가 참여하면 Mission 화면이 열려요." /> : null}
+          {pending ? <InlineMessage text={t.waitingPartner} /> : null}
 
-          <TextInput autoCapitalize="characters" onChangeText={setCode} placeholder="초대 코드 입력" style={styles.input} value={code} />
+          <TextInput autoCapitalize="characters" onChangeText={setCode} placeholder={t.enterInvite} style={styles.input} value={code} />
           <Pressable disabled={loading} onPress={joinInvite} style={[styles.outlineButton, loading && styles.disabledButton]}>
             <Text allowFontScaling={false} style={styles.outlineButtonText}>
-              코드로 참여하기
+              {t.joinByCode}
             </Text>
           </Pressable>
         </View>
@@ -1010,23 +1436,54 @@ function InlineMessage({ text }: { text: string }) {
   );
 }
 
-function buildMeta(members: CoupleMember[], dayCount: number | null) {
-  const cities = members.map((member) => member.city).filter(Boolean) as string[];
-  const [first, second] = [cities[0] ?? DEFAULT_CITY_PAIR[0], cities[1] ?? DEFAULT_CITY_PAIR[1]];
-  return `${first} <-> ${second}${dayCount ? ` · D+${dayCount}` : ''}`;
+type SplitMembers = {
+  me: CoupleMember | null;
+  partner: CoupleMember | null;
+};
+
+function splitMembers(members: CoupleMember[], myUserId: string): SplitMembers {
+  return {
+    me: members.find((member) => member.user_id === myUserId) ?? null,
+    partner: members.find((member) => member.user_id !== myUserId) ?? null,
+  };
 }
 
-function formatDate(value: string) {
+function displayMemberName(member: CoupleMember | null, fallback: string) {
+  return member?.display_name?.trim() || fallback;
+}
+
+function buildMeta(members: SplitMembers, dayLabel: string | null, t: Copy) {
+  const partnerLocation = formatLocation(members.partner, t.cityFallbackPartner);
+  const myLocation = formatLocation(members.me, t.cityFallbackMe);
+  return `${partnerLocation} ↔ ${myLocation}${dayLabel ? ` · ${dayLabel}` : ` · ${t.dayNotSet}`}`;
+}
+
+function formatLocation(member: CoupleMember | null, fallback: string) {
+  return [member?.city, member?.country].filter(Boolean).join(', ') || fallback;
+}
+
+function getMissionPrompt(mission: Pick<TodayDropPayload['mission'], 'prompt_ko' | 'prompt_en'> | null | undefined, language: Language) {
+  if (!mission) {
+    return language === 'ko' ? '오늘의 Mission' : "Today's Mission";
+  }
+  return language === 'en' ? mission.prompt_en || mission.prompt_ko : mission.prompt_ko || mission.prompt_en || "Today's Mission";
+}
+
+function formatDate(value: string, language: Language) {
   const date = new Date(`${value}T00:00:00`);
-  return new Intl.DateTimeFormat('en', {
+  return new Intl.DateTimeFormat(language === 'ko' ? 'ko-KR' : 'en', {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
   }).format(date);
 }
 
-function shortId(value: string) {
-  return value ? value.slice(0, 8) : '-';
+function getDeviceTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Seoul';
+  } catch {
+    return 'Asia/Seoul';
+  }
 }
 
 function sideRadius(side: 'left' | 'right') {
@@ -1075,8 +1532,9 @@ const styles = StyleSheet.create({
     borderRadius: 15,
     borderWidth: 1,
     elevation: 3,
-    marginBottom: 18,
-    padding: 12,
+    marginBottom: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 10,
     shadowColor: '#000000',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.09,
@@ -1086,24 +1544,25 @@ const styles = StyleSheet.create({
     color: '#777777',
     fontSize: 15,
     fontWeight: '500',
-    marginBottom: 12,
+    marginBottom: 8,
   },
   missionTitle: {
     color: '#050505',
     fontSize: 22,
     fontWeight: '800',
     lineHeight: 30,
-    marginBottom: 8,
+    marginBottom: 6,
   },
   missionMeta: {
-    color: '#737373',
-    fontSize: 15,
-    fontWeight: '500',
-    marginBottom: 16,
+    color: '#777777',
+    fontSize: 14,
+    fontWeight: '400',
+    marginBottom: 10,
   },
   photoPair: {
     flexDirection: 'row',
-    height: 220,
+    gap: 0,
+    height: 252,
   },
   dropSlot: {
     alignItems: 'center',
@@ -1111,34 +1570,33 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     overflow: 'hidden',
   },
-  dashedSlot: {
-    borderColor: '#D6D6D6',
-    borderStyle: 'dashed',
-    borderWidth: 1.3,
-  },
   blueSlot: {
-    backgroundColor: '#F7FAFE',
-    borderColor: '#C4D2E4',
+    backgroundColor: '#FAFAFA',
   },
   sandSlot: {
-    backgroundColor: '#FFFDF8',
-    borderColor: '#DCCDBA',
+    backgroundColor: '#FAFAFA',
   },
   waitingSlot: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#FAFAFA',
   },
   waitingContent: {
     alignItems: 'center',
     gap: 14,
+    paddingHorizontal: 12,
     transform: [{ translateY: -6 }],
   },
   waitingText: {
     color: '#353535',
     fontSize: 14,
     fontWeight: '500',
+    textAlign: 'center',
   },
   imageSlot: {
     backgroundColor: '#EAEAEA',
+  },
+  fillPressable: {
+    flex: 1,
+    width: '100%',
   },
   leftSlotRadius: {
     borderBottomLeftRadius: 15,
@@ -1159,35 +1617,37 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     width: '100%',
   },
-  emptyLabel: {
-    color: '#050505',
-    fontSize: 21,
-    fontWeight: '800',
-    marginTop: 16,
-  },
   emptyMessage: {
-    color: '#727272',
-    fontSize: 13,
+    color: '#666666',
+    fontSize: 14,
     fontWeight: '500',
-    marginTop: 6,
+    lineHeight: 20,
+    marginTop: 12,
+    maxWidth: '76%',
     textAlign: 'center',
   },
   bottomLabelMuted: {
-    bottom: 20,
-    color: '#858585',
-    fontSize: 21,
-    fontWeight: '800',
+    bottom: 16,
+    color: '#777777',
+    fontSize: 16,
+    fontWeight: '500',
+    left: 12,
     position: 'absolute',
+    right: 12,
+    textAlign: 'center',
   },
   photoLabel: {
-    bottom: 18,
+    bottom: 16,
     color: '#FFFFFF',
-    fontSize: 21,
-    fontWeight: '800',
+    fontSize: 16,
+    fontWeight: '500',
+    left: 12,
     position: 'absolute',
-    textShadowColor: 'rgba(0, 0, 0, 0.44)',
+    right: 12,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.18)',
     textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
+    textShadowRadius: 1,
   },
   mosaicOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -1204,6 +1664,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 10,
+  },
+  partnerLockVeil: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.12)',
+  },
+  partnerLockContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingBottom: 0,
+    paddingHorizontal: 28,
+  },
+  partnerLockText: {
+    color: 'rgba(255, 255, 255, 0.94)',
+    fontSize: 13,
+    fontWeight: '500',
+    lineHeight: 18,
+    marginTop: 8,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.2)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 1,
   },
   lockTitle: {
     color: '#FFFFFF',
@@ -1223,41 +1704,38 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   sendSlot: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#E3E3E3',
-    borderWidth: 1,
-    padding: 10,
+    backgroundColor: '#FAFAFA',
+    borderWidth: 0,
+    padding: 0,
   },
   innerDashedSlot: {
     alignItems: 'center',
-    borderColor: '#CFCFCF',
-    borderRadius: 14,
-    borderStyle: 'dashed',
-    borderWidth: 1.3,
+    backgroundColor: 'transparent',
     flex: 1,
     justifyContent: 'center',
     width: '100%',
   },
   plusCircle: {
     alignItems: 'center',
-    backgroundColor: '#A7A7A7',
-    borderRadius: 24,
-    height: 48,
+    backgroundColor: '#A9A9A9',
+    borderRadius: 19,
+    height: 38,
     justifyContent: 'center',
-    marginBottom: 14,
-    width: 48,
+    marginBottom: 10,
+    width: 38,
   },
   sendText: {
-    color: '#6E6E6E',
-    fontSize: 15,
-    fontWeight: '700',
+    color: '#666666',
+    fontSize: 14,
+    fontWeight: '500',
+    textAlign: 'center',
   },
   stateMessage: {
-    color: '#111111',
-    fontSize: 16,
-    fontWeight: '500',
-    lineHeight: 24,
-    marginBottom: 16,
+    color: '#5F5F5F',
+    fontSize: 15,
+    fontWeight: '400',
+    lineHeight: 21,
+    marginBottom: 12,
     textAlign: 'center',
   },
   primaryButton: {
@@ -1275,8 +1753,8 @@ const styles = StyleSheet.create({
   },
   primaryButtonText: {
     color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: '800',
+    fontSize: 16,
+    fontWeight: '700',
   },
   disabledButton: {
     backgroundColor: '#F0F0F0',
@@ -1417,7 +1895,6 @@ const styles = StyleSheet.create({
   closeButton: {
     position: 'absolute',
     right: 22,
-    top: 58,
     zIndex: 2,
   },
   fullImage: {
@@ -1425,7 +1902,6 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   fullCaption: {
-    bottom: 42,
     gap: 8,
     left: 24,
     position: 'absolute',
@@ -1441,6 +1917,27 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '500',
     lineHeight: 21,
+  },
+  fullDeleteButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.96)',
+    borderColor: 'rgba(17, 17, 17, 0.08)',
+    borderRadius: 999,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 40,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    position: 'absolute',
+    right: 22,
+  },
+  fullDeleteButtonDisabled: {
+    opacity: 0.82,
+  },
+  fullDeleteButtonText: {
+    color: '#111111',
+    fontSize: 13,
+    fontWeight: '700',
   },
   modalHeader: {
     alignItems: 'center',
@@ -1542,6 +2039,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#FEFDFB',
     borderTopLeftRadius: 22,
     borderTopRightRadius: 22,
+    maxHeight: '92%',
     padding: 20,
     paddingBottom: 30,
   },
@@ -1577,6 +2075,39 @@ const styles = StyleSheet.create({
     marginLeft: 16,
     textAlign: 'right',
   },
+  languageRow: {
+    alignItems: 'center',
+    borderBottomColor: '#ECECEC',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+    minHeight: 56,
+  },
+  segment: {
+    backgroundColor: '#EFEFEF',
+    borderRadius: 10,
+    flexDirection: 'row',
+    padding: 3,
+  },
+  segmentButton: {
+    borderRadius: 8,
+    minWidth: 86,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  segmentButtonActive: {
+    backgroundColor: '#111111',
+  },
+  segmentText: {
+    color: '#555555',
+    fontSize: 13,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  segmentTextActive: {
+    color: '#FFFFFF',
+  },
   logoutButton: {
     alignItems: 'center',
     backgroundColor: '#111111',
@@ -1585,7 +2116,7 @@ const styles = StyleSheet.create({
     gap: 8,
     height: 52,
     justifyContent: 'center',
-    marginTop: 18,
+    marginTop: 12,
   },
   logoutText: {
     color: '#FFFFFF',
@@ -1636,6 +2167,7 @@ const styles = StyleSheet.create({
     borderStyle: 'dashed',
     borderWidth: 1,
     marginBottom: 18,
+    marginTop: 12,
     paddingVertical: 18,
   },
   inviteCode: {
@@ -1656,6 +2188,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     height: 54,
     justifyContent: 'center',
+    marginBottom: 12,
   },
   outlineButtonText: {
     color: '#111111',

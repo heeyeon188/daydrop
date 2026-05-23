@@ -12,44 +12,27 @@ export async function getMyCouple(): Promise<MyCouple | null> {
     data: { user },
   } = await supabase.auth.getUser();
 
-  console.log('[useMyCouple] user', user?.id);
-
   if (!user) {
-    console.log('[useMyCouple] final myCouple', null);
     return null;
   }
 
-  const { data: member, error: memberError } = await supabase
-    .from('couple_members')
-    .select('*')
-    .eq('user_id', user.id)
-    .maybeSingle();
-
-  console.log('[useMyCouple] member', member, memberError);
+  const { data: member, error: memberError } = await supabase.from('couple_members').select('*').eq('user_id', user.id).maybeSingle();
 
   if (memberError) {
     throw memberError;
   }
 
   if (!member) {
-    console.log('[useMyCouple] final myCouple', null);
     return null;
   }
 
-  const { data: couple, error: coupleError } = await supabase
-    .from('couples')
-    .select('*')
-    .eq('id', member.couple_id)
-    .maybeSingle();
-
-  console.log('[useMyCouple] couple', couple, coupleError);
+  const { data: couple, error: coupleError } = await supabase.from('couples').select('*').eq('id', member.couple_id).maybeSingle();
 
   if (coupleError) {
     throw coupleError;
   }
 
   if (!couple) {
-    console.log('[useMyCouple] final myCouple', null);
     return null;
   }
 
@@ -59,25 +42,21 @@ export async function getMyCouple(): Promise<MyCouple | null> {
     .eq('couple_id', member.couple_id)
     .order('created_at', { ascending: true });
 
-  console.log('[useMyCouple] members', members, membersError);
-
   if (membersError) {
     throw membersError;
   }
 
-  const finalCouple = {
+  return {
     couple: couple as Couple,
     member: member as CoupleMember,
     members: (members ?? []) as CoupleMember[],
   };
-
-  console.log('[useMyCouple] final myCouple', finalCouple);
-
-  return finalCouple;
 }
 
-export async function createCoupleInvite() {
-  const { data, error } = await supabase.rpc('create_couple_invite');
+export async function createCoupleInvite(relationshipStartDate?: string | null) {
+  const { data, error } = await supabase.rpc('create_couple_invite', {
+    p_relationship_start_date: relationshipStartDate || null,
+  });
   if (error) {
     throw error;
   }
@@ -92,14 +71,6 @@ export async function joinCoupleByInviteCode(inviteCode: string) {
   if (error) {
     throw error;
   }
-
-  const { data: couple, error: coupleError } = await supabase
-    .from('couples')
-    .select('id, status, connected_at')
-    .eq('id', data)
-    .maybeSingle();
-
-  console.log('[joinCoupleByInviteCode] couple status after join', couple, coupleError);
 
   return data as string;
 }

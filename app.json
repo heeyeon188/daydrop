@@ -38,6 +38,14 @@
             "backgroundColor": "#000000"
           }
         }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Daydrop uses your photos so you can send today's drop.",
+          "cameraPermission": "Daydrop uses your camera so you can take today's drop.",
+          "microphonePermission": false
+        }
       ]
     ],
     "experiments": {
