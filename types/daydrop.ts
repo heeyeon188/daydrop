@@ -1,6 +1,8 @@
 import type { User } from '@supabase/supabase-js';
 
 export type DropState = 'none' | 'meOnly' | 'partnerOnly' | 'both';
+export type PartnerType = 'couple' | 'friend';
+export type MissionAudience = 'common' | PartnerType;
 
 export type AuthUser = User;
 
@@ -9,8 +11,9 @@ export type Profile = {
   display_name: string | null;
   country: string | null;
   city: string | null;
-  timezone: string | null;
+  timezone?: string | null;
   preferred_language: 'ko' | 'en' | null;
+  selected_couple_id?: string | null;
   profile_completed: boolean | null;
   created_at: string;
   updated_at: string;
@@ -21,6 +24,7 @@ export type Couple = {
   invite_code: string;
   created_by: string | null;
   status: 'pending' | 'active';
+  partner_type: PartnerType | null;
   relationship_start_date: string | null;
   created_at: string;
   connected_at: string | null;
@@ -34,7 +38,7 @@ export type CoupleMember = {
   display_name: string | null;
   country: string | null;
   city: string | null;
-  timezone: string | null;
+  timezone?: string | null;
   created_at: string;
 };
 
@@ -43,6 +47,7 @@ export type Mission = {
   prompt_ko: string;
   prompt_en: string | null;
   mission_type: string | null;
+  audience: MissionAudience | null;
   active: boolean | null;
   sort_order: number | null;
   created_at: string;

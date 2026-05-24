@@ -8,20 +8,39 @@ export async function getOrCreateTodayDrop(): Promise<TodayDropPayload> {
   if (error) {
     throw error;
   }
-  return signTodayPhotoUrls(data as TodayDropPayload);
+  const payload = data as TodayDropPayload;
+  console.log('[today_drop] selected mission', {
+    coupleId: payload.daily_drop.couple_id,
+    missionType: payload.mission?.mission_type ?? null,
+    relationshipType: payload.couple?.partner_type ?? null,
+  });
+  return signTodayPhotoUrls(payload);
 }
 
 export async function submitDropPhoto({
   base64,
   coupleId,
   dropId,
+  fileInfo,
   userId,
 }: {
   base64: string;
   coupleId: string;
   dropId: string;
+  fileInfo?: {
+    height: number;
+    uri: string;
+    width: number;
+  };
   userId: string;
 }) {
+  console.log('[photo] submit drop photo', {
+    coupleId,
+    dropId,
+    userId,
+    fileInfo,
+  });
+
   const uploaded = await uploadDropImage({ base64, coupleId, dropId, userId });
 
   const { data, error } = await supabase
@@ -40,7 +59,17 @@ export async function submitDropPhoto({
     throw error;
   }
 
-  await notifyPartnerPhotoSubmitted(coupleId, userId);
+  console.log('[photo] drop submission saved', {
+    id: data.id,
+    storagePath: uploaded.storagePath,
+    imageUrl: uploaded.imageUrl,
+    fileInfo,
+  });
+
+  void notifyPartnerPhotoSubmitted({
+    coupleId,
+    dropSubmissionId: data.id,
+  });
 
   return data as DropSubmission;
 }
@@ -64,21 +93,11 @@ export async function deleteMyTodayDropPhoto({
   currentUserId?: string | null;
 } = {}) {
   const getTargetRpcName = 'get_my_today_drop_photo_to_delete';
-  const getTargetRpcParams = null;
-
-  console.log('deleteMyTodayDropPhoto start');
-  console.log('current drop id', currentDropId ?? null);
-  console.log('current user id', currentUserId ?? null);
-  console.log('deleteMyTodayDropPhoto rpc name', getTargetRpcName);
-  console.log('deleteMyTodayDropPhoto rpc params', getTargetRpcParams);
 
   const { data, error } = await supabase.rpc(getTargetRpcName);
 
-  console.log('rpc result', data ?? null);
-  console.log('rpc error', error ?? null);
-
   if (error) {
-    console.error('deleteMyTodayDropPhoto rpc failed', error);
+    console.error('deleteMyTodayDropPhoto rpc failed', error, { currentDropId, currentUserId });
     throw error;
   }
 
@@ -89,22 +108,16 @@ export async function deleteMyTodayDropPhoto({
     throw new Error('missing_storage_path');
   }
 
-  console.log('[delete] target storage path', storagePath);
-
   const { data: removeData, error: removeError } = await supabase.storage.from('daydrop-photos').remove([storagePath]);
 
-  console.log('[delete] storage remove result', removeData ?? null, removeError ?? null);
-
   if (removeError) {
-    console.error('[delete] storage remove failed', removeError);
+    console.error('[delete] storage remove failed', removeError, removeData);
     throw removeError;
   }
 
   const deleteRowRpcName = 'delete_my_today_drop_photo_row';
   const deleteRowRpcParams = { target_storage_path: storagePath };
   const { data: deleteData, error: deleteError } = await supabase.rpc(deleteRowRpcName, deleteRowRpcParams);
-
-  console.log('[delete] db delete result', deleteData ?? null, deleteError ?? null);
 
   if (deleteError) {
     console.error('[delete] db delete failed', deleteError);
@@ -138,22 +151,35 @@ export async function getRecentDrops(coupleId: string): Promise<RecentDrop[]> {
 async function signTodayPhotoUrls(payload: TodayDropPayload) {
   return {
     ...payload,
-    submissions: await Promise.all(payload.submissions.map(signSubmissionUrl)),
+    submissions: await signSubmissionUrls(payload.submissions),
   };
 }
 
 async function signRecentPhotoUrls(drop: RecentDrop) {
   return {
     ...drop,
-    drop_submissions: await Promise.all(drop.drop_submissions.map(signSubmissionUrl)),
+    drop_submissions: await signSubmissionUrls(drop.drop_submissions),
   };
 }
 
-async function signSubmissionUrl<T extends { storage_path: string; image_url: string }>(submission: T) {
+async function signSubmissionUrls<T extends { storage_path: string; image_url: string }>(submissions: T[]) {
+  const signedUrlByPath = new Map<string, Promise<string>>();
+
+  return Promise.all(
+    submissions.map((submission) => {
+      if (!signedUrlByPath.has(submission.storage_path)) {
+        signedUrlByPath.set(submission.storage_path, createPhotoSignedUrl(submission.storage_path));
+      }
+      return signSubmissionUrl(submission, signedUrlByPath.get(submission.storage_path)!);
+    })
+  );
+}
+
+async function signSubmissionUrl<T extends { storage_path: string; image_url: string }>(submission: T, signedUrl: Promise<string>) {
   try {
     return {
       ...submission,
-      image_url: await createPhotoSignedUrl(submission.storage_path),
+      image_url: await signedUrl,
     };
   } catch {
     return submission;

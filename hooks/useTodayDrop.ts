@@ -9,7 +9,7 @@ type RefetchResult = {
   today: TodayDropPayload;
 } | null;
 
-export function useTodayDrop(coupleId: string | null) {
+export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null) {
   const [today, setToday] = React.useState<TodayDropPayload | null>(null);
   const [recentDrops, setRecentDrops] = React.useState<RecentDrop[]>([]);
   const [loading, setLoading] = React.useState(false);
@@ -18,7 +18,7 @@ export function useTodayDrop(coupleId: string | null) {
 
   const refetch = React.useCallback(
     async (isRefresh = false): Promise<RefetchResult> => {
-      if (!coupleId) {
+      if (!enabled) {
         setToday(null);
         setRecentDrops([]);
         return null;
@@ -41,20 +41,15 @@ export function useTodayDrop(coupleId: string | null) {
           today: nextToday,
         };
       } catch (nextError) {
-        const message =
-          nextError instanceof Error
-            ? nextError.message
-            : typeof nextError === 'object' && nextError !== null && 'message' in nextError && typeof nextError.message === 'string'
-              ? nextError.message
-              : 'Could not load today\'s Drop.';
-        setError(message);
+        console.error('load today drop failed', nextError);
+        setError('네트워크 상태를 확인하고 다시 시도해주세요.');
         return null;
       } finally {
         setLoading(false);
         setRefreshing(false);
       }
     },
-    [coupleId]
+    [enabled, selectedCoupleId]
   );
 
   React.useEffect(() => {
@@ -62,6 +57,7 @@ export function useTodayDrop(coupleId: string | null) {
   }, [refetch]);
 
   React.useEffect(() => {
+    const coupleId = today?.daily_drop.couple_id;
     if (!coupleId) {
       return undefined;
     }
@@ -85,7 +81,7 @@ export function useTodayDrop(coupleId: string | null) {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [coupleId, refetch]);
+  }, [today?.daily_drop.couple_id, refetch]);
 
   return {
     today,

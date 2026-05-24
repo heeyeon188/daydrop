@@ -1,11 +1,19 @@
 import { Feather } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as AppleAuthentication from 'expo-apple-authentication';
+import * as Application from 'expo-application';
+import { CameraView, type CameraType, useCameraPermissions } from 'expo-camera';
 import * as Clipboard from 'expo-clipboard';
+import * as Device from 'expo-device';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Notifications from 'expo-notifications';
 import React from 'react';
 import {
   ActivityIndicator,
   Alert,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -13,31 +21,55 @@ import {
   SafeAreaView,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { displayDayCount } from '@/lib/dayCount';
+import { PRIVACY_POLICY_URL, SUPPORT_EMAIL } from '@/constants/appConfig';
 import { getTranslations, normalizeLanguage, type Language } from '@/lib/i18n';
+import { findCountryOption, getCountryLabel, searchCountryOptions } from '@/lib/locations';
 import { useMyCouple } from '@/hooks/useMyCouple';
 import { useProfile } from '@/hooks/useProfile';
 import { useSession } from '@/hooks/useSession';
 import { useTodayDrop } from '@/hooks/useTodayDrop';
-import { signInWithEmail, signOut, signUpWithEmail } from '@/services/auth';
-import { createCoupleInvite, joinCoupleByInviteCode, type MyCouple } from '@/services/couple';
+import { deleteAccount } from '@/services/account';
+import { signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut, signUpWithEmail } from '@/services/auth';
+import { createCoupleInvite, joinCoupleByInviteCode, selectCouple, type MyCouple, type MyCoupleOption } from '@/services/couple';
 import { deleteMyTodayDropPhoto, submitDropPhoto } from '@/services/drops';
-import { registerPushToken } from '@/services/notifications';
+import {
+  getNotificationPreferences,
+  registerPushToken,
+  saveNotificationPreferences,
+  setCurrentUserPushTokensEnabled,
+  type NotificationPreferenceKey,
+  type NotificationPreferences,
+} from '@/services/notifications';
 import { completeProfile, updatePreferredLanguage, type ProfileInput } from '@/services/profile';
-import { pickImageFromLibrary, takePhotoWithCamera } from '@/services/storage';
-import type { CoupleMember, DropState, DropSubmission, Profile, RecentDrop, TodayDropPayload } from '@/types/daydrop';
+import { normalizeCameraPhoto, type CameraFacing, type DaydropPhotoAsset } from '@/services/storage';
+import type { CoupleMember, DropState, DropSubmission, PartnerType, Profile, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
 const MOSAIC_BLOCKS = Array.from({ length: 28 }, (_, index) => index);
+const EMPTY_MEMBERS: CoupleMember[] = [];
+const PERMISSION_INTRO_STORAGE_KEY = 'daydrop.hasSeenPermissionIntro';
+const DEFAULT_PHOTO_PAIR_HEIGHT = 292;
+const RECENT_THUMB_GROUP_WIDTH = 138;
+const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
+const RECENT_THUMB_DEFAULT_HEIGHT = 82;
+const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
+  dailyQuestion: true,
+  partnerConnected: true,
+  partnerPhotoUploaded: true,
+  pushEnabled: true,
+};
 
 type Copy = ReturnType<typeof getTranslations>;
+type FeatherIconName = React.ComponentProps<typeof Feather>['name'];
 type FullImage = { canDelete?: boolean; image?: string; label: string; mission: string };
 type DropDetail = { drop: RecentDrop; state: DropState };
+type ImageSize = { height: number; width: number };
 
 export default function MissionScreen() {
   const { user, loading: sessionLoading, configError } = useSession();
@@ -45,12 +77,6 @@ export default function MissionScreen() {
   const myCouple = useMyCouple(Boolean(user));
   const language = normalizeLanguage(profileState.profile?.preferred_language);
   const t = getTranslations(language);
-
-  React.useEffect(() => {
-    if (user) {
-      registerPushToken(user.id);
-    }
-  }, [user]);
 
   if (sessionLoading) {
     return <CenteredState text={t.loadingApp} />;
@@ -64,8 +90,8 @@ export default function MissionScreen() {
     return <AuthScreen language={language} />;
   }
 
-  if (profileState.loading || (myCouple.loading && profileState.profile?.profile_completed)) {
-    return <CenteredState text={profileState.loading ? t.loadingApp : t.coupleLoading} />;
+  if (profileState.loading) {
+    return <CenteredState text={t.loadingApp} />;
   }
 
   if (!profileState.profile?.profile_completed) {
@@ -82,41 +108,12 @@ export default function MissionScreen() {
     );
   }
 
-  if (!myCouple.couple) {
-    return (
-      <CoupleConnectScreen
-        language={language}
-        inviteCode={null}
-        onConnected={myCouple.refetch}
-        onLogout={signOut}
-        pending={false}
-        profile={profileState.profile}
-      />
-    );
-  }
-
-  const couple = myCouple.couple.couple;
-  const coupleReady = couple.status === 'active' && myCouple.couple.members.length >= 2;
-
-  if (!coupleReady) {
-    return (
-      <CoupleConnectScreen
-        language={language}
-        inviteCode={couple.invite_code}
-        onConnected={myCouple.refetch}
-        onLogout={signOut}
-        pending
-        profile={profileState.profile}
-      />
-    );
-  }
-
   return (
     <MissionContent
       language={language}
       myCouple={myCouple.couple}
-      myEmail={user.email ?? 'No email'}
       myUserId={user.id}
+      onCoupleChanged={myCouple.refetch}
       onLanguageChanged={profileState.setProfile}
       onLogout={signOut}
       onProfileSaved={async (profile) => {
@@ -131,79 +128,124 @@ export default function MissionScreen() {
 function MissionContent({
   language,
   myCouple,
-  myEmail,
   myUserId,
+  onCoupleChanged,
   onLanguageChanged,
   onLogout,
   onProfileSaved,
   profile,
 }: {
   language: Language;
-  myCouple: MyCouple;
-  myEmail: string;
+  myCouple: MyCouple | null;
   myUserId: string;
+  onCoupleChanged: () => Promise<void>;
   onLanguageChanged: (profile: Profile) => void;
   onLogout: () => Promise<void>;
   onProfileSaved: (profile: Profile) => Promise<void>;
   profile: Profile;
 }) {
   const t = getTranslations(language);
-  const { today, recentDrops, loading, refreshing, error, refetch } = useTodayDrop(myCouple.couple.id);
+  const { today, recentDrops, loading, refreshing, error, refetch } = useTodayDrop(true, myCouple?.couple.id);
   const [deletingPhoto, setDeletingPhoto] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const [fullImage, setFullImage] = React.useState<FullImage | null>(null);
   const [allDropsVisible, setAllDropsVisible] = React.useState(false);
+  const [cameraVisible, setCameraVisible] = React.useState(false);
+  const [connectVisible, setConnectVisible] = React.useState(false);
   const [dropDetail, setDropDetail] = React.useState<DropDetail | null>(null);
+  const [partnerMenuVisible, setPartnerMenuVisible] = React.useState(false);
+  const [permissionIntroVisible, setPermissionIntroVisible] = React.useState(false);
+  const [photoPairWidth, setPhotoPairWidth] = React.useState(0);
   const [settingsVisible, setSettingsVisible] = React.useState(false);
-  const members = splitMembers(today?.members ?? myCouple.members, myUserId);
-  const state = getDropState(today, myUserId);
-  const stateCopy = getStateCopy(state, t);
-  const dayLabel = today
-    ? displayDayCount(today.daily_drop.day_count, today.couple.relationship_start_date, today.daily_drop.drop_date)
-    : displayDayCount(null, myCouple.couple.relationship_start_date);
-  const meta = buildMeta(members, dayLabel, t);
-  const missionTitle = getMissionPrompt(today?.mission, language);
+  const activeMembers = today?.members ?? myCouple?.members ?? EMPTY_MEMBERS;
+  const members = React.useMemo(() => splitMembers(activeMembers, myUserId), [activeMembers, myUserId]);
+  const state = React.useMemo(() => getDropState(today, myUserId), [today, myUserId]);
+  const hasPartner = Boolean(today?.couple.status === 'active' && members.partner);
+  const hasUploadedToday = state === 'meOnly' || state === 'both';
+  const mainButtonDisabled = hasPartner ? hasUploadedToday || uploading || deletingPhoto : uploading || deletingPhoto;
+  const stateCopy = React.useMemo(() => getStateCopy(state, t, hasPartner), [hasPartner, state, t]);
+  const meta = React.useMemo(() => buildMeta(members, language, t), [language, members, t]);
+  const missionTitle = React.useMemo(() => getMissionPrompt(today?.mission, language), [language, today?.mission]);
+  const inviteCode = myCouple?.couple.status === 'pending' ? myCouple.couple.invite_code : null;
+  const coupleOptions = React.useMemo(() => myCouple?.availableCouples ?? [], [myCouple?.availableCouples]);
+  const partnerOptions = React.useMemo(
+    () => coupleOptions.filter((option) => option.couple.status === 'active' && option.members.some((member) => member.user_id !== myUserId)),
+    [coupleOptions, myUserId]
+  );
+  const partnerCount = partnerOptions.length;
+  const canAddPartner = coupleOptions.length < 4;
 
-  const uploadPickedPhoto = async (picker: () => ReturnType<typeof pickImageFromLibrary>) => {
+  React.useEffect(() => {
+    let mounted = true;
+
+    AsyncStorage.getItem(PERMISSION_INTRO_STORAGE_KEY)
+      .then((value) => {
+        if (mounted && value !== 'true') {
+          setPermissionIntroVisible(true);
+        }
+      })
+      .catch((nextError) => {
+        console.warn('permission intro lookup failed', nextError);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const dismissPermissionIntro = async () => {
+    setPermissionIntroVisible(false);
+    try {
+      await AsyncStorage.setItem(PERMISSION_INTRO_STORAGE_KEY, 'true');
+    } catch (nextError) {
+      console.warn('permission intro save failed', nextError);
+    }
+  };
+
+  const submitPhotoAsset = async (asset: DaydropPhotoAsset, source: CameraFacing) => {
     if (!today || state === 'meOnly' || state === 'both' || uploading || deletingPhoto) {
       return;
     }
 
     try {
       setUploading(true);
-      const picked = await picker();
-      if (!picked) {
-        return;
-      }
+      const picked = await normalizeCameraPhoto(asset, source);
 
       await submitDropPhoto({
         base64: picked.base64 ?? '',
         coupleId: today.daily_drop.couple_id,
         dropId: today.daily_drop.id,
+        fileInfo: {
+          height: picked.height,
+          uri: picked.uri,
+          width: picked.width,
+        },
         userId: myUserId,
       });
       await refetch(true);
+      setCameraVisible(false);
     } catch (nextError) {
       const message = nextError instanceof Error ? nextError.message : '';
-      Alert.alert(
-        t.uploadError,
-        message === 'photo_permission_denied' ? t.photoPermission : message === 'photo_read_failed' ? t.photoReadError : message || t.photoReadError
-      );
+      if (message === 'photo_permission_denied') {
+        Alert.alert(t.photoPermission, language === 'ko' ? '설정에서 카메라 권한을 허용해주세요.' : 'Please allow camera access in Settings.', [
+          { text: t.cancel, style: 'cancel' },
+          { text: language === 'ko' ? '설정 열기' : 'Open Settings', onPress: () => Linking.openSettings() },
+        ]);
+      } else {
+        console.error('submitDropPhoto failed', nextError);
+        Alert.alert(t.uploadError, message === 'photo_read_failed' ? t.photoReadError : t.unknownError);
+      }
     } finally {
       setUploading(false);
     }
   };
 
   const handleUpload = () => {
-    if (deletingPhoto) {
+    if (!today || deletingPhoto || uploading || state === 'meOnly' || state === 'both') {
       return;
     }
 
-    Alert.alert(t.pickPhotoTitle, undefined, [
-      { text: t.camera, onPress: () => uploadPickedPhoto(takePhotoWithCamera) },
-      { text: t.album, onPress: () => uploadPickedPhoto(pickImageFromLibrary) },
-      { text: t.cancel, style: 'cancel' },
-    ]);
+    setCameraVisible(true);
   };
 
   const handleDeleteMyPhoto = async () => {
@@ -218,22 +260,10 @@ function MissionContent({
         currentUserId: myUserId,
       });
       setFullImage(null);
-      const refetchResult = await refetch(true);
-      console.log(
-        'refetch result',
-        refetchResult
-          ? {
-              currentState: getDropState(refetchResult.today, myUserId),
-              currentSubmissionCount: refetchResult.today.submissions.length,
-              dropId: refetchResult.today.daily_drop.id,
-            }
-          : null
-      );
+      await refetch(true);
     } catch (nextError) {
       console.error('deleteMyTodayDropPhoto failed', nextError);
-      console.log('refetch result', 'skipped because delete failed');
-      const message = getErrorMessage(nextError);
-      Alert.alert(t.deletePhotoError, message || t.unknownError);
+      Alert.alert(t.deletePhotoError, t.unknownError);
     } finally {
       setDeletingPhoto(false);
     }
@@ -260,6 +290,33 @@ function MissionContent({
     Alert.alert(t.dropLocked, t.openAfterSend);
   };
 
+  const openAddPartner = () => {
+    if (!canAddPartner) {
+      Alert.alert(t.partnerLimitTitle, t.partnerLimitBody);
+      return;
+    }
+    setPartnerMenuVisible(false);
+    setSettingsVisible(false);
+    setConnectVisible(true);
+  };
+
+  const handleSelectPartner = async (coupleId: string) => {
+    if (coupleId === myCouple?.couple.id) {
+      setPartnerMenuVisible(false);
+      return;
+    }
+
+    try {
+      setPartnerMenuVisible(false);
+      await selectCouple(coupleId);
+      await onCoupleChanged();
+      await refetch(true);
+    } catch (nextError) {
+      console.error('select couple failed', nextError);
+      Alert.alert(t.partnerSelectError, t.unknownError);
+    }
+  };
+
   if (loading && !today) {
     return <CenteredState text={t.loadingMission} />;
   }
@@ -272,9 +329,12 @@ function MissionContent({
         contentContainerStyle={styles.scrollContent}>
         <Header onMenuPress={() => setSettingsVisible(true)} />
 
-        <Text allowFontScaling={false} style={styles.sectionTitle}>
-          {t.mission}
-        </Text>
+        <View style={styles.missionHeader}>
+          <Text allowFontScaling={false} style={[styles.sectionTitle, styles.missionHeaderTitle]}>
+            {t.mission}
+          </Text>
+          <PartnerPill count={partnerCount} onPress={() => setPartnerMenuVisible(true)} />
+        </View>
 
         {error ? <InlineMessage text={error} /> : null}
 
@@ -290,7 +350,11 @@ function MissionContent({
               <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.missionMeta}>
                 {meta}
               </Text>
-              <View style={styles.photoPair}>
+              <View
+                style={styles.photoPair}
+                onLayout={(event) => {
+                  setPhotoPairWidth(event.nativeEvent.layout.width);
+                }}>
                 <TodayDropPair
                   language={language}
                   members={members}
@@ -299,9 +363,11 @@ function MissionContent({
                   onOpenImage={setFullImage}
                   onUploadPress={handleUpload}
                   deletingPhoto={deletingPhoto}
+                  hasPartner={hasPartner}
                   state={state}
                   t={t}
                   today={today}
+                  width={photoPairWidth}
                 />
               </View>
             </View>
@@ -311,15 +377,21 @@ function MissionContent({
             </Text>
 
             <Pressable
-              disabled={state === 'meOnly' || state === 'both' || uploading || deletingPhoto}
-              onPress={handleUpload}
-              style={[styles.primaryButton, (state === 'meOnly' || state === 'both' || uploading || deletingPhoto) && styles.disabledButton]}>
-              {uploading ? (
+              disabled={mainButtonDisabled}
+              onPress={hasPartner ? handleUpload : openAddPartner}
+              style={[
+                styles.primaryButton,
+                mainButtonDisabled && styles.disabledButton,
+              ]}>
+              {uploading && hasPartner ? (
                 <ActivityIndicator color="#FFFFFF" />
               ) : (
                 <Text
                   allowFontScaling={false}
-                  style={[styles.primaryButtonText, (state === 'meOnly' || state === 'both' || deletingPhoto) && styles.disabledButtonText]}>
+                  style={[
+                    styles.primaryButtonText,
+                    mainButtonDisabled && styles.disabledButtonText,
+                  ]}>
                   {stateCopy.button}
                 </Text>
               )}
@@ -347,9 +419,9 @@ function MissionContent({
               <RecentDropRow
                 key={drop.id}
                 drop={drop}
+                hasPartner={hasPartner}
                 language={language}
                 myUserId={myUserId}
-                relationshipStartDate={today?.couple.relationship_start_date ?? myCouple.couple.relationship_start_date}
                 onPress={() => setDropDetail({ drop, state: getRecentDropState(drop, myUserId) })}
               />
             ))
@@ -366,9 +438,9 @@ function MissionContent({
       />
       <AllDropsModal
         drops={recentDrops}
+        hasPartner={hasPartner}
         language={language}
         myUserId={myUserId}
-        relationshipStartDate={today?.couple.relationship_start_date ?? myCouple.couple.relationship_start_date}
         t={t}
         onClose={() => setAllDropsVisible(false)}
         onOpenDrop={(drop) => setDropDetail({ drop, state: getRecentDropState(drop, myUserId) })}
@@ -376,15 +448,13 @@ function MissionContent({
       />
       <DropDetailModal
         detail={dropDetail}
+        hasPartner={hasPartner}
         language={language}
         myUserId={myUserId}
-        relationshipStartDate={today?.couple.relationship_start_date ?? myCouple.couple.relationship_start_date}
         t={t}
         onClose={() => setDropDetail(null)}
       />
       <SettingsSheet
-        couple={myCouple}
-        email={myEmail}
         language={language}
         profile={profile}
         t={t}
@@ -394,6 +464,42 @@ function MissionContent({
         onLogout={onLogout}
         onProfileSaved={onProfileSaved}
       />
+      <PermissionIntroModal language={language} onClose={dismissPermissionIntro} visible={permissionIntroVisible} />
+      <DaydropCameraModal
+        language={language}
+        mission={missionTitle}
+        onClose={() => setCameraVisible(false)}
+        onUsePhoto={submitPhotoAsset}
+        submitting={uploading}
+        visible={cameraVisible}
+      />
+      <PartnerDropdown
+        canAddPartner={canAddPartner}
+        currentCoupleId={myCouple?.couple.id ?? null}
+        language={language}
+        myUserId={myUserId}
+        onAddPartner={openAddPartner}
+        onClose={() => setPartnerMenuVisible(false)}
+        onSelectPartner={handleSelectPartner}
+        options={partnerOptions}
+        t={t}
+        visible={partnerMenuVisible}
+      />
+      <Modal animationType="slide" visible={connectVisible} onRequestClose={() => setConnectVisible(false)}>
+        <CoupleConnectScreen
+          currentPartnerType={myCouple?.couple.partner_type ?? null}
+          inviteCode={inviteCode}
+          language={language}
+          onConnected={async () => {
+            await onCoupleChanged();
+            await refetch(true);
+          }}
+          onClose={() => setConnectVisible(false)}
+          onLogout={onLogout}
+          pending={Boolean(inviteCode)}
+          profile={profile}
+        />
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -414,8 +520,360 @@ function Header({ onMenuPress }: { onMenuPress: () => void }) {
   );
 }
 
+function DaydropCameraModal({
+  language,
+  mission,
+  onClose,
+  onUsePhoto,
+  submitting,
+  visible,
+}: {
+  language: Language;
+  mission: string;
+  onClose: () => void;
+  onUsePhoto: (asset: DaydropPhotoAsset, source: CameraFacing) => Promise<void>;
+  submitting: boolean;
+  visible: boolean;
+}) {
+  const [permission, requestPermission] = useCameraPermissions();
+  const [facing, setFacing] = React.useState<CameraType>('back');
+  const [flash, setFlash] = React.useState<'off' | 'on'>('off');
+  const [captured, setCaptured] = React.useState<(DaydropPhotoAsset & { didFlip?: boolean; mirrorMode?: string; source: CameraFacing }) | null>(null);
+  const [cameraReady, setCameraReady] = React.useState(false);
+  const [capturing, setCapturing] = React.useState(false);
+  const cameraRef = React.useRef<CameraView>(null);
+  const hasPermission = permission?.granted === true;
+  const shutterDisabled = !hasPermission || !cameraReady || capturing || submitting;
+
+  React.useEffect(() => {
+    if (!visible) {
+      setCaptured(null);
+      setCapturing(false);
+      setCameraReady(false);
+      setFlash('off');
+      setFacing('back');
+    }
+  }, [visible]);
+
+  React.useEffect(() => {
+    if (!visible || captured) {
+      return;
+    }
+
+    console.log('[DaydropCamera] state', {
+      facing,
+      hasPermission,
+      cameraReady,
+      isCapturing: capturing,
+      hasCameraRef: Boolean(cameraRef.current),
+      shutterDisabled,
+    });
+  }, [cameraReady, captured, capturing, facing, hasPermission, shutterDisabled, visible]);
+
+  const capturePhoto = async () => {
+    const camera = cameraRef.current;
+    const captureFacing: CameraFacing = facing === 'front' ? 'front' : 'back';
+
+    if (!camera || shutterDisabled) {
+      console.log('[DaydropCamera] capture blocked', {
+        facing: captureFacing,
+        hasPermission,
+        cameraReady,
+        isCapturing: capturing,
+        hasCameraRef: Boolean(camera),
+        shutterDisabled,
+      });
+      return;
+    }
+
+    try {
+      setCapturing(true);
+      console.log('[DaydropCamera] capture start', { facing: captureFacing });
+      const photo = await camera.takePictureAsync({
+        base64: true,
+        exif: true,
+        quality: 0.9,
+      });
+
+      if (!photo?.base64) {
+        throw new Error('photo_read_failed');
+      }
+
+      const normalized = await normalizeCameraPhoto(
+        {
+          base64: photo.base64,
+          exif: {
+            ...(photo.exif ?? {}),
+            daydropCaptureSource: captureFacing,
+          },
+          height: photo.height,
+          mimeType: 'image/jpeg',
+          uri: photo.uri,
+          width: photo.width,
+        },
+        captureFacing
+      );
+
+      console.log('[DaydropCamera] captured', {
+        facing: captureFacing,
+        width: normalized.width,
+        height: normalized.height,
+        orientation: normalized.exif?.Orientation ?? normalized.exif?.orientation ?? null,
+        mirrorMode: normalized.mirrorMode ?? 'none',
+        didFlip: normalized.didFlip === true,
+      });
+
+      setCaptured({ ...normalized, source: captureFacing });
+    } catch (nextError) {
+      console.error('[DaydropCamera] capture error', { facing: captureFacing, error: nextError });
+      console.error('custom camera capture failed', nextError);
+      Alert.alert(language === 'ko' ? '사진을 찍지 못했어요.' : 'Could not take photo', language === 'ko' ? '다시 시도해주세요.' : 'Please try again.');
+    } finally {
+      setCapturing(false);
+    }
+  };
+
+  const usePhoto = async () => {
+    if (!captured || submitting) {
+      return;
+    }
+
+    await onUsePhoto(
+      {
+        base64: captured.base64,
+        exif: {
+          ...(captured.exif ?? {}),
+          daydropCaptureSource: captured.source,
+        },
+        height: captured.height,
+        mimeType: 'image/jpeg',
+        uri: captured.uri,
+        width: captured.width,
+      },
+      captured.source
+    );
+  };
+
+  const requestOrOpenSettings = async () => {
+    if (permission?.canAskAgain === false) {
+      await Linking.openSettings();
+      return;
+    }
+    await requestPermission();
+  };
+
+  const toggleFacing = () => {
+    setCameraReady(false);
+    setCapturing(false);
+    setFacing((current) => (current === 'front' ? 'back' : 'front'));
+  };
+
+  const topMission = mission || (language === 'ko' ? '오늘의 Mission' : "Today's Mission");
+  const permissionText = language === 'ko' ? '사진을 보내려면 카메라 권한이 필요해요.' : 'Camera permission is needed to send a photo.';
+  const permissionButtonText = language === 'ko' ? '카메라 권한 허용하기' : 'Allow camera permission';
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} presentationStyle="fullScreen" visible={visible}>
+      <SafeAreaView style={styles.cameraScreen}>
+        <View style={styles.cameraHeader}>
+          <Pressable hitSlop={12} onPress={onClose} style={styles.cameraIconButton}>
+            <Feather name="chevron-down" size={32} color="#FFFFFF" strokeWidth={2.3} />
+          </Pressable>
+          <View style={styles.cameraTitleWrap}>
+            <Text allowFontScaling={false} style={styles.cameraBrand}>
+              DAYDROP
+            </Text>
+            <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.cameraMission}>
+              {topMission}
+            </Text>
+          </View>
+          <View style={styles.cameraIconButton} />
+        </View>
+
+        {!permission ? (
+          <View style={styles.cameraCentered}>
+            <ActivityIndicator color="#FFFFFF" />
+          </View>
+        ) : !permission.granted ? (
+          <View style={styles.cameraPermission}>
+            <Text allowFontScaling={false} style={styles.cameraPermissionText}>
+              {permissionText}
+            </Text>
+            <Pressable onPress={requestOrOpenSettings} style={styles.cameraPermissionButton}>
+              <Text allowFontScaling={false} style={styles.cameraPermissionButtonText}>
+                {permissionButtonText}
+              </Text>
+            </Pressable>
+            {permission.canAskAgain === false ? (
+              <Pressable hitSlop={8} onPress={() => Linking.openSettings()}>
+                <Text allowFontScaling={false} style={styles.cameraSettingsText}>
+                  {language === 'ko' ? '설정 열기' : 'Open Settings'}
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+        ) : (
+          <>
+            <View style={styles.cameraPreviewShell}>
+              {captured ? (
+                <Image resizeMode="cover" source={{ uri: captured.uri }} style={styles.cameraPreview} />
+              ) : (
+                <CameraView
+                  key={`daydrop-camera-${facing}`}
+                  ref={cameraRef}
+                  active={visible && !captured}
+                  animateShutter
+                  facing={facing}
+                  flash={flash}
+                  mirror={false}
+                  mode="picture"
+                  onCameraReady={() => {
+                    console.log('[DaydropCamera] ready', { facing });
+                    setCameraReady(true);
+                  }}
+                  style={[styles.cameraPreview, facing === 'front' && styles.cameraPreviewMirrored]}
+                />
+              )}
+            </View>
+
+            {captured ? (
+              <View style={styles.cameraConfirmBar}>
+                <Pressable
+                  disabled={submitting}
+                  onPress={() => {
+                    setCameraReady(false);
+                    setCaptured(null);
+                  }}
+                  style={styles.cameraTextButton}>
+                  <Text allowFontScaling={false} style={styles.cameraTextButtonLabel}>
+                    {language === 'ko' ? '다시 찍기' : 'Retake'}
+                  </Text>
+                </Pressable>
+                <Pressable disabled={submitting} onPress={usePhoto} style={[styles.cameraUseButton, submitting && styles.cameraControlDisabled]}>
+                  {submitting ? (
+                    <ActivityIndicator color="#111111" />
+                  ) : (
+                    <Text allowFontScaling={false} style={styles.cameraUseButtonText}>
+                      {language === 'ko' ? '사진 사용' : 'Use Photo'}
+                    </Text>
+                  )}
+                </Pressable>
+              </View>
+            ) : (
+              <View style={styles.cameraControls}>
+                <Pressable onPress={() => setFlash((current) => (current === 'on' ? 'off' : 'on'))} style={styles.cameraRoundButton}>
+                  <Feather name={flash === 'on' ? 'zap' : 'zap-off'} size={22} color="#FFFFFF" strokeWidth={2.1} />
+                </Pressable>
+                <Pressable
+                  disabled={shutterDisabled}
+                  onPress={capturePhoto}
+                  style={[styles.shutterButton, shutterDisabled && styles.cameraControlDisabled]}>
+                  <View style={styles.shutterInner} />
+                </Pressable>
+                <Pressable onPress={toggleFacing} style={styles.cameraRoundButton}>
+                  <Feather name="refresh-cw" size={25} color="#FFFFFF" strokeWidth={2.1} />
+                </Pressable>
+              </View>
+            )}
+          </>
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+function PartnerPill({ count, onPress }: { count: number; onPress: () => void }) {
+  const label = count === 1 ? '1 Partner' : `${count} Partners`;
+
+  return (
+    <Pressable onPress={onPress} style={styles.partnerPill}>
+      <Text allowFontScaling={false} numberOfLines={1} style={styles.partnerPillText}>
+        {label}
+      </Text>
+      <Feather name="chevron-down" size={16} color="#555555" />
+    </Pressable>
+  );
+}
+
+function PartnerDropdown({
+  canAddPartner,
+  currentCoupleId,
+  language,
+  myUserId,
+  onAddPartner,
+  onClose,
+  onSelectPartner,
+  options,
+  t,
+  visible,
+}: {
+  canAddPartner: boolean;
+  currentCoupleId: string | null;
+  language: Language;
+  myUserId: string;
+  onAddPartner: () => void;
+  onClose: () => void;
+  onSelectPartner: (coupleId: string) => void;
+  options: MyCoupleOption[];
+  t: Copy;
+  visible: boolean;
+}) {
+  return (
+    <Modal animationType="fade" transparent visible={visible} onRequestClose={onClose}>
+      <Pressable style={styles.dropdownBackdrop} onPress={onClose}>
+        <Pressable style={styles.partnerDropdown}>
+          {options.length === 0 ? (
+            <Text allowFontScaling={false} style={styles.partnerEmptyText}>
+              {t.beforePartner}
+            </Text>
+          ) : (
+            options.map((option) => {
+              const partner = option.members.find((member) => member.user_id !== myUserId) ?? null;
+              const name = displayMemberName(partner, option.couple.status === 'pending' ? t.pending : t.partner);
+              const isSelected = option.couple.id === currentCoupleId;
+              const location = formatLocation(partner, language, '');
+
+              return (
+                <Pressable key={option.couple.id} onPress={() => onSelectPartner(option.couple.id)} style={styles.partnerOption}>
+                  <View style={styles.partnerAvatar}>
+                    <Text allowFontScaling={false} style={styles.partnerAvatarText}>
+                      {name.slice(0, 1).toUpperCase()}
+                    </Text>
+                  </View>
+                  <View style={styles.partnerOptionTextWrap}>
+                    <Text allowFontScaling={false} numberOfLines={1} style={styles.partnerOptionName}>
+                      {name}
+                    </Text>
+                    {location ? (
+                      <Text allowFontScaling={false} numberOfLines={1} style={styles.partnerOptionMeta}>
+                        {location}
+                      </Text>
+                    ) : null}
+                  </View>
+                  {isSelected ? <Feather name="check" size={20} color="#111111" /> : null}
+                </Pressable>
+              );
+            })
+          )}
+
+          <View style={styles.partnerDivider} />
+          <Pressable onPress={onAddPartner} style={[styles.partnerOption, !canAddPartner && styles.partnerOptionDisabled]}>
+            <View style={styles.addPartnerCircle}>
+              <Feather name="plus" size={20} color={canAddPartner ? '#555555' : '#A3A3A3'} />
+            </View>
+            <Text allowFontScaling={false} style={[styles.addPartnerText, !canAddPartner && styles.disabledButtonText]}>
+              Add partner
+            </Text>
+          </Pressable>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
 function TodayDropPair({
   deletingPhoto,
+  hasPartner,
   language,
   members,
   myUserId,
@@ -425,8 +883,10 @@ function TodayDropPair({
   state,
   t,
   today,
+  width,
 }: {
   deletingPhoto: boolean;
+  hasPartner: boolean;
   language: Language;
   members: SplitMembers;
   myUserId: string;
@@ -436,17 +896,44 @@ function TodayDropPair({
   state: DropState;
   t: Copy;
   today: TodayDropPayload;
+  width: number;
 }) {
-  const mine = today.submissions.find((submission) => submission.user_id === myUserId);
-  const partner = today.submissions.find((submission) => submission.user_id !== myUserId);
+  const submissions = React.useMemo(() => splitSubmissions(today.submissions, myUserId), [myUserId, today.submissions]);
+  const { mine, partner } = submissions;
+  const mineSize = useImageSize(mine?.image_url);
+  const partnerSize = useImageSize(partner?.image_url);
+  const slotWidth = width > 0 ? width / 2 : 0;
+  const mineHeight = calculateImageHeight(slotWidth, mineSize, DEFAULT_PHOTO_PAIR_HEIGHT);
+  const partnerHeight = calculateImageHeight(slotWidth, partnerSize, DEFAULT_PHOTO_PAIR_HEIGHT);
   const myLabel = displayMemberName(members.me, t.me);
   const partnerLabel = displayMemberName(members.partner, t.partner);
   const mission = getMissionPrompt(today.mission, language);
+
+  if (!hasPartner) {
+    return (
+      <>
+        <PrePartnerSlot height={mine ? mineHeight : DEFAULT_PHOTO_PAIR_HEIGHT} t={t} />
+        {mine ? (
+          <EditablePhotoSlot
+            deleting={deletingPhoto}
+            height={mineHeight}
+            image={mine.image_url}
+            label={myLabel}
+            onOpenImage={() => onOpenImage({ canDelete: true, image: mine.image_url, label: myLabel, mission })}
+            side="right"
+          />
+        ) : (
+          <SendSlot height={DEFAULT_PHOTO_PAIR_HEIGHT} label={myLabel} message={getSoloSendMessage(today.mission, language)} onPress={onUploadPress} t={t} />
+        )}
+      </>
+    );
+  }
 
   if (state === 'both') {
     return (
       <>
         <PhotoSlot
+          height={partnerHeight}
           image={partner?.image_url}
           label={partnerLabel}
           side="left"
@@ -454,6 +941,7 @@ function TodayDropPair({
         />
         <EditablePhotoSlot
           deleting={deletingPhoto}
+          height={mineHeight}
           image={mine?.image_url}
           label={myLabel}
           onOpenImage={() => onOpenImage({ canDelete: true, image: mine?.image_url, label: myLabel, mission })}
@@ -466,9 +954,10 @@ function TodayDropPair({
   if (state === 'meOnly') {
     return (
       <>
-        <WaitingSlot label={partnerLabel} t={t} />
+        <WaitingSlot height={mine ? mineHeight : DEFAULT_PHOTO_PAIR_HEIGHT} label={partnerLabel} t={t} />
         <EditablePhotoSlot
           deleting={deletingPhoto}
+          height={mineHeight}
           image={mine?.image_url}
           label={myLabel}
           onOpenImage={() => onOpenImage({ canDelete: true, image: mine?.image_url, label: myLabel, mission })}
@@ -481,8 +970,8 @@ function TodayDropPair({
   if (state === 'partnerOnly') {
     return (
       <>
-        <LockedPhotoSlot image={partner?.image_url} label={partnerLabel} onPress={onLockedPartnerPress} t={t} />
-        <SendSlot label={myLabel} onPress={onUploadPress} t={t} />
+        <LockedPhotoSlot height={partnerHeight} image={partner?.image_url} label={partnerLabel} onPress={onLockedPartnerPress} t={t} />
+        <SendSlot height={partner ? partnerHeight : DEFAULT_PHOTO_PAIR_HEIGHT} label={myLabel} onPress={onUploadPress} t={t} />
       </>
     );
   }
@@ -504,8 +993,7 @@ function getRecentDropState(drop: RecentDrop, myUserId: string): DropState {
 }
 
 function getSubmissionState(submissions: DropSubmission[], myUserId: string): DropState {
-  const mine = submissions.some((submission) => submission.user_id === myUserId);
-  const partner = submissions.some((submission) => submission.user_id !== myUserId);
+  const { mine, partner } = splitSubmissions(submissions, myUserId);
 
   if (mine && partner) return 'both';
   if (mine) return 'meOnly';
@@ -513,7 +1001,14 @@ function getSubmissionState(submissions: DropSubmission[], myUserId: string): Dr
   return 'none';
 }
 
-function getStateCopy(state: DropState, t: Copy) {
+function getStateCopy(state: DropState, t: Copy, hasPartner: boolean) {
+  if (!hasPartner) {
+    return {
+      message: t.soloTodayHint,
+      button: t.connectPartnerFirst,
+    };
+  }
+
   switch (state) {
     case 'both':
       return { message: t.todayOpen, button: t.todayOpen };
@@ -535,7 +1030,22 @@ function getStateCopy(state: DropState, t: Copy) {
   }
 }
 
+function PrePartnerSlot({ height, t }: { height: number; t: Copy }) {
+  return (
+    <View style={[styles.dropSlot, styles.prePartnerSlot, sideRadius('left'), { height }]}>
+      <Feather name="users" size={46} color="#8B8B8B" strokeWidth={1.45} />
+      <Text allowFontScaling={false} style={styles.prePartnerTitle}>
+        {t.beforePartner}
+      </Text>
+      <Text allowFontScaling={false} style={styles.prePartnerBody}>
+        {t.beforePartnerBody}
+      </Text>
+    </View>
+  );
+}
+
 function EmptySlot({
+  height = DEFAULT_PHOTO_PAIR_HEIGHT,
   icon,
   label,
   message,
@@ -543,6 +1053,7 @@ function EmptySlot({
   side,
   tone,
 }: {
+  height?: number;
   icon: keyof typeof Feather.glyphMap;
   label: string;
   message: string;
@@ -554,7 +1065,7 @@ function EmptySlot({
   const toneColor = tone === 'blue' ? '#7890AE' : '#9B8D77';
 
   return (
-    <Pressable disabled={!onPress} onPress={onPress} style={[styles.dropSlot, toneStyle, sideRadius(side)]}>
+    <Pressable disabled={!onPress} onPress={onPress} style={[styles.dropSlot, toneStyle, sideRadius(side), { height }]}>
       <Feather name={icon} size={30} color={toneColor} strokeWidth={1.6} />
       <Text allowFontScaling={false} style={styles.emptyMessage}>
         {message}
@@ -566,9 +1077,9 @@ function EmptySlot({
   );
 }
 
-function WaitingSlot({ label, t }: { label: string; t: Copy }) {
+function WaitingSlot({ height, label, t }: { height: number; label: string; t: Copy }) {
   return (
-    <View style={[styles.dropSlot, styles.waitingSlot, sideRadius('left')]}>
+    <View style={[styles.dropSlot, styles.waitingSlot, sideRadius('left'), { height }]}>
       <View style={styles.waitingContent}>
         <Feather name="refresh-cw" size={40} color="#858585" strokeWidth={1.65} />
         <Text allowFontScaling={false} style={styles.waitingText}>
@@ -582,9 +1093,9 @@ function WaitingSlot({ label, t }: { label: string; t: Copy }) {
   );
 }
 
-function PhotoSlot({ image, label, onPress, side }: { image?: string; label: string; onPress: () => void; side: 'left' | 'right' }) {
+function PhotoSlot({ height, image, label, onPress, side }: { height: number; image?: string; label: string; onPress: () => void; side: 'left' | 'right' }) {
   return (
-    <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius(side)]}>
+    <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius(side), { height }]}>
       <SafeImage image={image} label={label} />
       <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.photoLabel}>
         {label}
@@ -595,19 +1106,21 @@ function PhotoSlot({ image, label, onPress, side }: { image?: string; label: str
 
 function EditablePhotoSlot({
   deleting,
+  height,
   image,
   label,
   onOpenImage,
   side,
 }: {
   deleting: boolean;
+  height: number;
   image?: string;
   label: string;
   onOpenImage: () => void;
   side: 'left' | 'right';
 }) {
   return (
-    <Pressable disabled={deleting} onPress={onOpenImage} style={[styles.dropSlot, styles.imageSlot, sideRadius(side)]}>
+    <Pressable disabled={deleting} onPress={onOpenImage} style={[styles.dropSlot, styles.imageSlot, sideRadius(side), { height }]}>
       <SafeImage image={image} label={label} />
       <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.photoLabel}>
         {label}
@@ -616,9 +1129,9 @@ function EditablePhotoSlot({
   );
 }
 
-function LockedPhotoSlot({ image, label, onPress, t }: { image?: string; label: string; onPress: () => void; t: Copy }) {
+function LockedPhotoSlot({ height, image, label, onPress, t }: { height: number; image?: string; label: string; onPress: () => void; t: Copy }) {
   return (
-    <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius('left')]}>
+    <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius('left'), { height }]}>
       <SafeImage blurRadius={24} image={image} label={label} />
       <View pointerEvents="none" style={styles.partnerLockVeil} />
       <View style={[styles.lockContent, styles.partnerLockContent]}>
@@ -631,15 +1144,15 @@ function LockedPhotoSlot({ image, label, onPress, t }: { image?: string; label: 
   );
 }
 
-function SendSlot({ label, onPress, t }: { label: string; onPress: () => void; t: Copy }) {
+function SendSlot({ height, label, message, onPress, t }: { height: number; label: string; message?: string; onPress: () => void; t: Copy }) {
   return (
-    <Pressable onPress={onPress} style={[styles.dropSlot, styles.sendSlot, sideRadius('right')]}>
+    <Pressable onPress={onPress} style={[styles.dropSlot, styles.sendSlot, sideRadius('right'), { height }]}>
       <View style={styles.innerDashedSlot}>
         <View style={styles.plusCircle}>
           <Feather name="plus" size={22} color="#FFFFFF" strokeWidth={2.2} />
         </View>
         <Text allowFontScaling={false} style={styles.sendText}>
-          {t.sendMine}
+          {message ?? t.sendMine}
         </Text>
         <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.bottomLabelMuted}>
           {label}
@@ -667,7 +1180,7 @@ function SafeImage({ blurRadius = 0, image, label }: { blurRadius?: number; imag
   return (
     <Image
       blurRadius={blurRadius}
-      resizeMode="cover"
+      resizeMode="contain"
       source={{ uri: image }}
       style={styles.slotImage}
       onError={(event) => {
@@ -700,27 +1213,30 @@ function MosaicOverlay() {
 
 function RecentDropRow({
   drop,
+  hasPartner,
   language,
   myUserId,
   onPress,
-  relationshipStartDate,
 }: {
   drop: RecentDrop;
+  hasPartner: boolean;
   language: Language;
   myUserId: string;
   onPress: () => void;
-  relationshipStartDate?: string | null;
 }) {
-  const mine = drop.drop_submissions.find((submission) => submission.user_id === myUserId);
-  const partner = drop.drop_submissions.find((submission) => submission.user_id !== myUserId);
-  const isOpen = Boolean(mine && partner);
-  const dayLabel = displayDayCount(drop.day_count, relationshipStartDate, drop.drop_date);
+  const { mine, partner } = React.useMemo(() => splitSubmissions(drop.drop_submissions, myUserId), [drop.drop_submissions, myUserId]);
+  const shouldLock = hasPartner && !mine && Boolean(partner);
+  const mineSize = useImageSize(mine?.image_url);
+  const partnerSize = useImageSize(partner?.image_url);
+  const mineHeight = calculateImageHeight(RECENT_THUMB_SLOT_WIDTH, mineSize, RECENT_THUMB_DEFAULT_HEIGHT);
+  const partnerHeight = calculateImageHeight(RECENT_THUMB_SLOT_WIDTH, partnerSize, RECENT_THUMB_DEFAULT_HEIGHT);
+  const thumbHeight = Math.max(mine ? mineHeight : 0, partner ? partnerHeight : 0, RECENT_THUMB_DEFAULT_HEIGHT);
 
   return (
-    <Pressable onPress={onPress} style={styles.recentRow}>
-      <View style={styles.recentThumbs}>
-        <RecentThumb image={partner?.image_url} locked={!isOpen && Boolean(partner)} side="left" />
-        <RecentThumb image={mine?.image_url} locked={!isOpen && Boolean(mine)} side="right" />
+    <Pressable onPress={onPress} style={[styles.recentRow, { minHeight: Math.max(88, thumbHeight + 6) }]}>
+      <View style={[styles.recentThumbs, { height: thumbHeight }]}>
+        <RecentThumb height={partner ? partnerHeight : thumbHeight} image={partner?.image_url} locked={shouldLock} side="left" />
+        <RecentThumb height={mine ? mineHeight : thumbHeight} image={mine?.image_url} locked={false} side="right" />
       </View>
       <View style={styles.recentInfo}>
         <Text allowFontScaling={false} style={styles.recentDate}>
@@ -730,7 +1246,7 @@ function RecentDropRow({
           {getMissionPrompt(drop.mission, language)}
         </Text>
         <Text allowFontScaling={false} style={styles.recentMeta}>
-          {dayLabel ?? getTranslations(language).dayNotSet}
+          {formatDate(drop.drop_date, language)}
         </Text>
       </View>
       <Feather name="chevron-right" size={20} color="#777777" />
@@ -738,9 +1254,9 @@ function RecentDropRow({
   );
 }
 
-function RecentThumb({ image, locked, side }: { image?: string; locked: boolean; side: 'left' | 'right' }) {
+function RecentThumb({ height = RECENT_THUMB_DEFAULT_HEIGHT, image, locked, side }: { height?: number; image?: string; locked: boolean; side: 'left' | 'right' }) {
   return (
-    <View style={[styles.recentThumb, side === 'left' ? styles.recentThumbLeft : styles.recentThumbRight]}>
+    <View style={[styles.recentThumb, side === 'left' ? styles.recentThumbLeft : styles.recentThumbRight, { height }]}>
       {image ? <SafeImage blurRadius={locked ? 12 : 0} image={image} label={`recent-${side}`} /> : <View style={styles.recentPlaceholder} />}
       {locked ? (
         <>
@@ -803,34 +1319,22 @@ function FullImageModal({
   );
 }
 
-function getErrorMessage(error: unknown) {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-
-  if (typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string') {
-    return error.message;
-  }
-
-  return '';
-}
-
 function AllDropsModal({
   drops,
+  hasPartner,
   language,
   myUserId,
   onClose,
   onOpenDrop,
-  relationshipStartDate,
   t,
   visible,
 }: {
   drops: RecentDrop[];
+  hasPartner: boolean;
   language: Language;
   myUserId: string;
   onClose: () => void;
   onOpenDrop: (drop: RecentDrop) => void;
-  relationshipStartDate?: string | null;
   t: Copy;
   visible: boolean;
 }) {
@@ -853,9 +1357,9 @@ function AllDropsModal({
               <AllDropRow
                 key={drop.id}
                 drop={drop}
+                hasPartner={hasPartner}
                 language={language}
                 myUserId={myUserId}
-                relationshipStartDate={relationshipStartDate}
                 onPress={() => {
                   onClose();
                   onOpenDrop(drop);
@@ -871,20 +1375,19 @@ function AllDropsModal({
 
 function AllDropRow({
   drop,
+  hasPartner,
   language,
   myUserId,
   onPress,
-  relationshipStartDate,
 }: {
   drop: RecentDrop;
+  hasPartner: boolean;
   language: Language;
   myUserId: string;
   onPress: () => void;
-  relationshipStartDate?: string | null;
 }) {
-  const mine = drop.drop_submissions.find((submission) => submission.user_id === myUserId);
-  const partner = drop.drop_submissions.find((submission) => submission.user_id !== myUserId);
-  const isOpen = Boolean(mine && partner);
+  const { mine, partner } = React.useMemo(() => splitSubmissions(drop.drop_submissions, myUserId), [drop.drop_submissions, myUserId]);
+  const shouldLock = hasPartner && !mine && Boolean(partner);
 
   return (
     <Pressable onPress={onPress} style={styles.allDropRow}>
@@ -896,12 +1399,12 @@ function AllDropRow({
           {getMissionPrompt(drop.mission, language)}
         </Text>
         <Text allowFontScaling={false} style={styles.recentMeta}>
-          {displayDayCount(drop.day_count, relationshipStartDate, drop.drop_date) ?? getTranslations(language).dayNotSet}
+          {formatDate(drop.drop_date, language)}
         </Text>
       </View>
       <View style={styles.allDropThumbs}>
-        <RecentThumb image={partner?.image_url} locked={!isOpen && Boolean(partner)} side="left" />
-        <RecentThumb image={mine?.image_url} locked={!isOpen && Boolean(mine)} side="right" />
+        <RecentThumb image={partner?.image_url} locked={shouldLock} side="left" />
+        <RecentThumb image={mine?.image_url} locked={false} side="right" />
       </View>
     </Pressable>
   );
@@ -909,24 +1412,23 @@ function AllDropRow({
 
 function DropDetailModal({
   detail,
+  hasPartner,
   language,
   myUserId,
   onClose,
-  relationshipStartDate,
   t,
 }: {
   detail: DropDetail | null;
+  hasPartner: boolean;
   language: Language;
   myUserId: string;
   onClose: () => void;
-  relationshipStartDate?: string | null;
   t: Copy;
 }) {
   const drop = detail?.drop;
-  const mine = drop?.drop_submissions.find((submission) => submission.user_id === myUserId);
-  const partner = drop?.drop_submissions.find((submission) => submission.user_id !== myUserId);
-  const isOpen = detail?.state === 'both';
-  const dayLabel = drop ? displayDayCount(drop.day_count, relationshipStartDate, drop.drop_date) : null;
+  const submissions = React.useMemo(() => (drop ? splitSubmissions(drop.drop_submissions, myUserId) : { mine: null, partner: null }), [drop, myUserId]);
+  const { mine, partner } = submissions;
+  const shouldLock = hasPartner && detail?.state === 'partnerOnly' && Boolean(partner);
 
   return (
     <Modal animationType="slide" transparent visible={Boolean(detail)} onRequestClose={onClose}>
@@ -939,7 +1441,7 @@ function DropDetailModal({
                 {getMissionPrompt(drop?.mission, language)}
               </Text>
               <Text allowFontScaling={false} style={styles.detailMeta}>
-                {drop ? `${formatDate(drop.drop_date, language)} · ${dayLabel ?? t.dayNotSet}` : ''}
+                {drop ? formatDate(drop.drop_date, language) : ''}
               </Text>
             </View>
             <Pressable hitSlop={12} onPress={onClose}>
@@ -947,8 +1449,8 @@ function DropDetailModal({
             </Pressable>
           </View>
           <View style={styles.detailPhotos}>
-            <DetailPhoto image={partner?.image_url} label={t.partner} locked={!isOpen && Boolean(partner)} />
-            <DetailPhoto image={mine?.image_url} label={t.me} locked={!isOpen && Boolean(mine)} />
+            <DetailPhoto image={partner?.image_url} label={t.partner} locked={shouldLock} />
+            <DetailPhoto image={mine?.image_url} label={t.me} locked={false} />
           </View>
         </View>
       </View>
@@ -975,9 +1477,36 @@ function DetailPhoto({ image, label, locked }: { image?: string; label: string; 
   );
 }
 
+function PermissionIntroModal({ language, onClose, visible }: { language: Language; onClose: () => void; visible: boolean }) {
+  const title = language === 'ko' ? '카메라/사진 권한 안내' : 'Camera & Photos';
+  const body =
+    language === 'ko'
+      ? '사진을 찍고 공유하려면 카메라/사진 권한이 필요해요. 권한 요청은 사진을 보내거나 찍을 때만 표시됩니다.'
+      : 'Daydrop needs camera/photos access to take and share daily photos. The native permission prompt appears only when you send or take a photo.';
+
+  return (
+    <Modal animationType="fade" transparent visible={visible} onRequestClose={onClose}>
+      <View style={styles.centerModalBackdrop}>
+        <View style={styles.centerModalCard}>
+          <Feather name="camera" size={30} color="#111111" />
+          <Text allowFontScaling={false} style={styles.deleteTitle}>
+            {title}
+          </Text>
+          <Text allowFontScaling={false} style={styles.privacyText}>
+            {body}
+          </Text>
+          <Pressable onPress={onClose} style={styles.primaryButton}>
+            <Text allowFontScaling={false} style={styles.primaryButtonText}>
+              {language === 'ko' ? '확인' : 'OK'}
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function SettingsSheet({
-  couple,
-  email,
   language,
   onClose,
   onLanguageChanged,
@@ -987,8 +1516,6 @@ function SettingsSheet({
   t,
   visible,
 }: {
-  couple: MyCouple;
-  email: string;
   language: Language;
   onClose: () => void;
   onLanguageChanged: (profile: Profile) => void;
@@ -998,10 +1525,105 @@ function SettingsSheet({
   t: Copy;
   visible: boolean;
 }) {
-  const [editing, setEditing] = React.useState(false);
+  const [mode, setMode] = React.useState<
+    'menu' | 'edit' | 'language' | 'notifications' | 'notices' | 'deleteIntro' | 'deleteFinal'
+  >('menu');
+  const [deleteConfirmText, setDeleteConfirmText] = React.useState('');
+  const [deletingAccount, setDeletingAccount] = React.useState(false);
   const [savingLanguage, setSavingLanguage] = React.useState(false);
-  const dayLabel = displayDayCount(null, couple.couple.relationship_start_date);
-  const connectionText = couple.couple.status === 'active' ? t.connected : t.pending;
+  const [notificationPermission, setNotificationPermission] = React.useState<'checking' | 'granted' | 'denied' | 'undetermined'>(
+    'checking'
+  );
+  const [notificationPreferences, setNotificationPreferences] =
+    React.useState<NotificationPreferences>(DEFAULT_NOTIFICATION_PREFERENCES);
+  const [loadingNotificationPreferences, setLoadingNotificationPreferences] = React.useState(false);
+  const [requestingNotificationPermission, setRequestingNotificationPermission] = React.useState(false);
+  const [clearingCache, setClearingCache] = React.useState(false);
+  const languageLabel = language === 'ko' ? t.korean : t.english;
+  const accountSubtitle = language === 'ko' ? '이름, 국가, 도시, 언어' : 'Name, country, city, language';
+  const pushEnabled = notificationPreferences.pushEnabled;
+  const notificationDisabledBySystem = notificationPermission === 'denied';
+  const notificationStatusText = !pushEnabled
+    ? language === 'ko'
+      ? '꺼짐'
+      : 'Off'
+    : notificationPermission === 'granted'
+      ? language === 'ko'
+        ? '켜짐'
+        : 'On'
+      : notificationPermission === 'denied'
+        ? language === 'ko'
+          ? '권한 필요'
+          : 'Needs permission'
+        : notificationPermission === 'undetermined'
+          ? language === 'ko'
+            ? '권한 필요'
+            : 'Needs permission'
+          : language === 'ko'
+            ? '확인 중'
+            : 'Checking';
+
+  React.useEffect(() => {
+    if (visible) {
+      setMode('menu');
+      setDeleteConfirmText('');
+    }
+  }, [visible]);
+
+  const refreshNotificationPermission = React.useCallback(async () => {
+    try {
+      const settings = await Notifications.getPermissionsAsync();
+      const granted =
+        settings.granted ||
+        settings.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL ||
+        settings.ios?.status === Notifications.IosAuthorizationStatus.EPHEMERAL;
+
+      if (granted) {
+        setNotificationPermission('granted');
+      } else if (settings.status === 'denied' || settings.canAskAgain === false) {
+        setNotificationPermission('denied');
+      } else {
+        setNotificationPermission('undetermined');
+      }
+    } catch (error) {
+      console.warn('notification permission check failed', error);
+      setNotificationPermission('undetermined');
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!visible) {
+      return;
+    }
+    void refreshNotificationPermission();
+  }, [refreshNotificationPermission, visible]);
+
+  React.useEffect(() => {
+    if (!visible) {
+      return;
+    }
+
+    let mounted = true;
+    setLoadingNotificationPreferences(true);
+    getNotificationPreferences()
+      .then((preferences) => {
+        if (mounted) {
+          setNotificationPreferences(preferences);
+        }
+      })
+      .catch((error) => {
+        console.warn('notification preferences load failed', error);
+      })
+      .finally(() => {
+        if (mounted) {
+          setLoadingNotificationPreferences(false);
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [visible]);
 
   const changeLanguage = async (nextLanguage: Language) => {
     if (nextLanguage === language || savingLanguage) {
@@ -1011,7 +1633,8 @@ function SettingsSheet({
     try {
       onLanguageChanged(await updatePreferredLanguage(nextLanguage));
     } catch (error) {
-      Alert.alert(t.profileSaveError, error instanceof Error ? error.message : t.photoReadError);
+      console.error('language update failed', error);
+      Alert.alert(t.profileSaveError, t.unknownError);
     } finally {
       setSavingLanguage(false);
     }
@@ -1031,65 +1654,599 @@ function SettingsSheet({
     ]);
   };
 
-  return (
-    <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
-      <Pressable style={styles.sheetBackdrop} onPress={onClose}>
-        <Pressable style={styles.profileSheet}>
-          <View style={styles.sheetHandle} />
-          <View style={styles.profileTop}>
-            <Text allowFontScaling={false} style={styles.profileTitle}>
-              Daydrop
-            </Text>
-            <Pressable hitSlop={12} onPress={onClose}>
-              <Feather name="x" size={24} color="#111111" />
-            </Pressable>
-          </View>
+  const handleDeleteAccount = async () => {
+    if (deletingAccount || !isDeleteConfirmText(deleteConfirmText)) {
+      return;
+    }
 
-          {editing ? (
-            <ProfileForm
-              initialLanguage={language}
-              profile={profile}
-              t={t}
-              onCancel={() => setEditing(false)}
-              onSaved={async (nextProfile) => {
-                await onProfileSaved(nextProfile);
-                setEditing(false);
-              }}
-            />
-          ) : (
-            <>
-              <InfoLine label={t.name} value={profile.display_name ?? '-'} />
-              <InfoLine label={t.email} value={email} />
-              <InfoLine label={`${t.country} / ${t.city}`} value={[profile.city, profile.country].filter(Boolean).join(', ') || '-'} />
-              <InfoLine label={t.timezone} value={profile.timezone ?? '-'} />
-              <InfoLine label={t.couple} value={connectionText} />
-              <InfoLine label={t.relationshipStartDate} value={couple.couple.relationship_start_date ? `${couple.couple.relationship_start_date} · ${dayLabel}` : t.dayNotSet} />
-              <View style={styles.languageRow}>
-                <Text allowFontScaling={false} style={styles.infoLabel}>
-                  {t.language}
-                </Text>
-                <View style={styles.segment}>
-                  <LanguageButton active={language === 'ko'} disabled={savingLanguage} label={t.korean} onPress={() => changeLanguage('ko')} />
-                  <LanguageButton active={language === 'en'} disabled={savingLanguage} label={t.english} onPress={() => changeLanguage('en')} />
-                </View>
+    setDeletingAccount(true);
+    try {
+      await deleteAccount();
+      await onLogout();
+      onClose();
+    } catch (error) {
+      console.error('delete account failed', error);
+      Alert.alert(t.deleteAccountError, t.unknownError);
+    } finally {
+      setDeletingAccount(false);
+    }
+  };
+
+  const handleRequestNotificationPermission = async () => {
+    if (requestingNotificationPermission) {
+      return;
+    }
+    setRequestingNotificationPermission(true);
+    try {
+      await registerPushToken();
+    } catch (error) {
+      console.warn('notification permission request failed', error);
+    } finally {
+      await refreshNotificationPermission();
+      setRequestingNotificationPermission(false);
+    }
+  };
+
+  const handleNotificationToggle = async (key: NotificationPreferenceKey, value: boolean) => {
+    const nextPreferences = {
+      ...notificationPreferences,
+      [key]: value,
+    };
+    setNotificationPreferences(nextPreferences);
+
+    try {
+      await saveNotificationPreferences(nextPreferences);
+
+      if (key === 'pushEnabled') {
+        if (value) {
+          await handleRequestNotificationPermission();
+        } else {
+          await setCurrentUserPushTokensEnabled(false);
+        }
+      }
+    } catch (error) {
+      console.warn('notification preferences save failed', error);
+      setNotificationPreferences(notificationPreferences);
+      Alert.alert(
+        language === 'ko' ? '알림 설정' : 'Notification Settings',
+        language === 'ko' ? '알림 설정을 저장하지 못했어요. 다시 시도해주세요.' : 'Could not save notification settings. Please try again.'
+      );
+    }
+  };
+
+  const handleOpenNotificationSettings = async () => {
+    try {
+      await Linking.openSettings();
+    } catch (error) {
+      console.warn('open settings failed', error);
+      Alert.alert(language === 'ko' ? '알림 설정' : 'Notification Settings', language === 'ko' ? '설정을 열 수 없어요.' : 'Could not open Settings.');
+    }
+  };
+
+  const clearLocalCache = async () => {
+    if (clearingCache) {
+      return;
+    }
+
+    setClearingCache(true);
+    try {
+      const cacheRoot = FileSystem.cacheDirectory;
+      if (!cacheRoot) {
+        throw new Error('cache directory is not available');
+      }
+
+      const entries = await FileSystem.readDirectoryAsync(cacheRoot);
+      await Promise.all(
+        entries.map(async (entry) => {
+          const target = `${cacheRoot}${entry}`;
+          try {
+            await FileSystem.deleteAsync(target, { idempotent: true });
+          } catch (error) {
+            console.warn('cache delete skipped', target, error);
+          }
+        })
+      );
+      Alert.alert(language === 'ko' ? '캐시를 지웠어요.' : 'Cache cleared.');
+    } catch (error) {
+      console.warn('clear cache failed', error);
+      Alert.alert(
+        language === 'ko' ? '캐시를 지우지 못했어요. 다시 시도해주세요.' : 'Could not clear the cache. Please try again.'
+      );
+    } finally {
+      setClearingCache(false);
+    }
+  };
+
+  const handleClearCache = async () => {
+    if (clearingCache) {
+      return;
+    }
+
+    Alert.alert(
+      language === 'ko' ? '캐시를 지울까요?' : 'Clear cache?',
+      language === 'ko'
+        ? '저장된 임시 이미지와 캐시가 삭제됩니다. 필요한 사진은 다시 불러와야 할 수 있어요.'
+        : 'Saved temporary images and cache will be deleted. Some photos may need to be loaded again.',
+      [
+        { text: language === 'ko' ? '취소' : 'Cancel', style: 'cancel' },
+        {
+          text: language === 'ko' ? '캐시 지우기' : 'Clear Cache',
+          style: 'destructive',
+          onPress: () => {
+            void clearLocalCache();
+          },
+        },
+      ]
+    );
+  };
+
+  const handleOpenSupportEmail = async () => {
+    const subject = '[Daydrop Support]';
+    const body = [
+      'App: Daydrop',
+      `Version: ${Application.nativeApplicationVersion ?? 'unknown'} (${Application.nativeBuildVersion ?? 'unknown'})`,
+      `Platform: ${Platform.OS} ${String(Platform.Version)}`,
+      `Device: ${Device.modelName ?? 'unknown'}`,
+      '',
+      language === 'ko' ? '문의 내용을 작성해주세요.' : 'Please describe your issue here.',
+    ].join('\n');
+
+    const url = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    try {
+      const canOpen = await Linking.canOpenURL(url);
+      if (!canOpen) {
+        throw new Error('mailto not supported');
+      }
+      await Linking.openURL(url);
+    } catch (error) {
+      console.warn('open mail app failed', error);
+      Alert.alert(
+        language === 'ko' ? '문의 이메일' : 'Support Email',
+        language === 'ko'
+          ? `메일 앱을 열 수 없어요.\n${SUPPORT_EMAIL}`
+          : `Could not open the mail app.\n${SUPPORT_EMAIL}`
+      );
+    }
+  };
+
+  const openPrivacyPolicy = async () => {
+    try {
+      await Linking.openURL(PRIVACY_POLICY_URL);
+    } catch (error) {
+      console.warn('open privacy policy failed', error);
+      Alert.alert(
+        language === 'ko' ? '개인정보 처리방침' : 'Privacy Policy',
+        language === 'ko'
+          ? `브라우저를 열 수 없어요.\n${PRIVACY_POLICY_URL}`
+          : `Could not open the browser.\n${PRIVACY_POLICY_URL}`
+      );
+    }
+  };
+
+  const title =
+    mode === 'edit'
+      ? t.editProfile
+      : mode === 'notifications'
+        ? language === 'ko'
+          ? '알림 설정'
+          : 'Notification Settings'
+        : mode === 'notices'
+          ? language === 'ko'
+            ? '공지사항'
+            : 'Notices'
+        : mode === 'language'
+          ? t.language
+          : mode === 'deleteIntro' || mode === 'deleteFinal'
+            ? t.deleteAccount
+            : t.settings;
+
+
+  return (
+    <Modal animationType="slide" visible={visible} onRequestClose={onClose}>
+      <SafeAreaView style={styles.settingsScreen}>
+        <View style={styles.settingsHeader}>
+          <Pressable hitSlop={12} onPress={mode === 'menu' ? onClose : () => setMode('menu')} style={styles.settingsBackButton}>
+            <Feather name="chevron-left" size={28} color="#111111" />
+          </Pressable>
+          <Text allowFontScaling={false} numberOfLines={1} style={styles.settingsTitle}>
+            {title}
+          </Text>
+          <View style={styles.settingsHeaderSpacer} />
+        </View>
+
+        <ScrollView
+          contentContainerStyle={styles.settingsContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}>
+          {mode === 'edit' ? (
+            <View style={styles.settingsDetail}>
+              <ProfileForm
+                initialLanguage={language}
+                profile={profile}
+                onCancel={() => setMode('menu')}
+                onSaved={async (nextProfile) => {
+                  await onProfileSaved(nextProfile);
+                  setMode('menu');
+                }}
+              />
+            </View>
+          ) : mode === 'language' ? (
+            <View style={styles.settingsDetail}>
+              <View style={styles.settingsLanguageSheet}>
+                <Pressable
+                  disabled={savingLanguage}
+                  onPress={() => changeLanguage('ko')}
+                  style={[styles.languageChoiceRow, language === 'ko' && styles.languageChoiceRowActive]}>
+                  <Text allowFontScaling={false} style={styles.languageChoiceText}>
+                    {t.korean}
+                  </Text>
+                  {language === 'ko' ? <Feather name="check" size={20} color="#111111" /> : null}
+                </Pressable>
+                <Pressable
+                  disabled={savingLanguage}
+                  onPress={() => changeLanguage('en')}
+                  style={[styles.languageChoiceRow, styles.languageChoiceRowLast, language === 'en' && styles.languageChoiceRowActive]}>
+                  <Text allowFontScaling={false} style={styles.languageChoiceText}>
+                    {t.english}
+                  </Text>
+                  {language === 'en' ? <Feather name="check" size={20} color="#111111" /> : null}
+                </Pressable>
               </View>
-              <Pressable onPress={() => setEditing(true)} style={styles.outlineButton}>
-                <Text allowFontScaling={false} style={styles.outlineButtonText}>
-                  {t.profile}
+            </View>
+          ) : mode === 'notifications' ? (
+            <View style={styles.settingsDetail}>
+              <View style={styles.notificationIntro}>
+                <Text allowFontScaling={false} style={styles.notificationIntroText}>
+                  {language === 'ko'
+                    ? 'Daydrop은 오늘의 질문, 파트너의 사진 업로드, 파트너 연결 소식을 알려드려요.'
+                    : "Daydrop sends updates for today's question, partner photo uploads, and partner connections."}
+                </Text>
+              </View>
+
+              {notificationDisabledBySystem ? (
+                <View style={styles.notificationPermissionBox}>
+                  <Text allowFontScaling={false} style={styles.notificationPermissionTitle}>
+                    {language === 'ko' ? 'iPhone 설정에서 Daydrop 알림을 켜주세요.' : 'Turn on Daydrop notifications in iPhone Settings.'}
+                  </Text>
+                  <Pressable onPress={handleOpenNotificationSettings} style={styles.notificationSettingsButton}>
+                    <Text allowFontScaling={false} style={styles.notificationSettingsButtonText}>
+                      {language === 'ko' ? '설정 열기' : 'Open Settings'}
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
+              {notificationPermission === 'undetermined' ? (
+                <Pressable
+                  disabled={requestingNotificationPermission}
+                  onPress={handleRequestNotificationPermission}
+                  style={[styles.notificationSettingsButton, styles.notificationPermissionRequestButton, requestingNotificationPermission && styles.disabledButton]}>
+                  {requestingNotificationPermission ? (
+                    <ActivityIndicator color="#111111" />
+                  ) : (
+                    <Text allowFontScaling={false} style={styles.notificationSettingsButtonText}>
+                      {language === 'ko' ? '알림 권한 허용하기' : 'Allow Notifications'}
+                    </Text>
+                  )}
+                </Pressable>
+              ) : null}
+
+              <SettingsSection title={language === 'ko' ? 'PUSH NOTIFICATIONS' : 'PUSH NOTIFICATIONS'}>
+                <NotificationToggleRow
+                  disabled={loadingNotificationPreferences}
+                  title={language === 'ko' ? '푸시 알림' : 'Push Notifications'}
+                  subtitle={
+                    language === 'ko'
+                      ? 'Daydrop의 모든 푸시 알림을 켜거나 꺼요.'
+                      : 'Turn all Daydrop push notifications on or off.'
+                  }
+                  value={pushEnabled}
+                  onValueChange={(value) => void handleNotificationToggle('pushEnabled', value)}
+                />
+                <NotificationToggleRow
+                  disabled={!pushEnabled || loadingNotificationPreferences}
+                  title={language === 'ko' ? '오늘 질문 알림' : "Today's Question"}
+                  subtitle={
+                    language === 'ko'
+                      ? '새로운 오늘의 질문이 준비되면 알려드려요. 기기 시간대 기준 오후 12시에 도착해요.'
+                      : "Get notified when today's question is ready. It arrives at 12:00 PM in your device timezone."
+                  }
+                  value={notificationPreferences.dailyQuestion}
+                  onValueChange={(value) => void handleNotificationToggle('dailyQuestion', value)}
+                />
+                <NotificationToggleRow
+                  disabled={!pushEnabled || loadingNotificationPreferences}
+                  title={language === 'ko' ? '파트너 사진 업로드 알림' : 'Partner Photo Uploads'}
+                  subtitle={
+                    language === 'ko'
+                      ? '파트너가 오늘의 사진을 올리면 알려드려요.'
+                      : "Get notified when your partner uploads today's photo."
+                  }
+                  value={notificationPreferences.partnerPhotoUploaded}
+                  onValueChange={(value) => void handleNotificationToggle('partnerPhotoUploaded', value)}
+                />
+                <NotificationToggleRow
+                  disabled={!pushEnabled || loadingNotificationPreferences}
+                  showDivider={false}
+                  title={language === 'ko' ? '파트너 연결 알림' : 'Partner Connections'}
+                  subtitle={
+                    language === 'ko'
+                      ? '새 파트너 연결이 완료되면 알려드려요.'
+                      : 'Get notified when a new partner connection is complete.'
+                  }
+                  value={notificationPreferences.partnerConnected}
+                  onValueChange={(value) => void handleNotificationToggle('partnerConnected', value)}
+                />
+              </SettingsSection>
+
+              {!pushEnabled ? (
+                <Text allowFontScaling={false} style={styles.notificationMutedHint}>
+                  {language === 'ko' ? '푸시 알림이 꺼져 있어 하위 알림도 비활성화되어 있어요.' : 'Push notifications are off, so the options below are disabled.'}
+                </Text>
+              ) : null}
+            </View>
+          ) : mode === 'notices' ? (
+            <View style={styles.settingsDetail}>
+              <Text allowFontScaling={false} style={styles.noticeVersion}>
+                {Application.nativeApplicationVersion ? `Daydrop v${Application.nativeApplicationVersion}` : 'Daydrop'}
+              </Text>
+              <Text allowFontScaling={false} style={styles.privacyText}>
+                {language === 'ko'
+                  ? '앱 업데이트, 점검 안내, 중요한 변경 사항을 이곳에서 확인할 수 있어요.'
+                  : 'App updates, maintenance notices, and important changes will appear here.'}
+              </Text>
+              <Text allowFontScaling={false} style={styles.privacyHint}>
+                {language === 'ko' ? '현재 등록된 공지사항은 없어요.' : 'There are no notices right now.'}
+              </Text>
+            </View>
+          ) : mode === 'deleteIntro' ? (
+            <View style={styles.settingsDetail}>
+              <Text allowFontScaling={false} style={styles.deleteTitle}>
+                {t.deleteAccountTitle}
+              </Text>
+              <Text allowFontScaling={false} style={styles.privacyText}>
+                {t.deleteAccountBody}
+              </Text>
+              <Pressable onPress={() => setMode('deleteFinal')} style={styles.dangerButton}>
+                <Text allowFontScaling={false} style={styles.logoutText}>
+                  {language === 'ko' ? '계속' : 'Continue'}
                 </Text>
               </Pressable>
-              <Pressable onPress={handleLogout} style={styles.logoutButton}>
-                <Feather name="log-out" size={19} color="#FFFFFF" />
-                <Text allowFontScaling={false} style={styles.logoutText}>
+              <Pressable onPress={() => setMode('menu')} style={styles.outlineButton}>
+                <Text allowFontScaling={false} style={styles.outlineButtonText}>
+                  {t.cancel}
+                </Text>
+              </Pressable>
+            </View>
+          ) : mode === 'deleteFinal' ? (
+            <View style={styles.settingsDetail}>
+              <Text allowFontScaling={false} style={styles.privacyText}>
+                {t.deleteAccountFinalBody}
+              </Text>
+              <TextInput
+                autoCapitalize="characters"
+                editable={!deletingAccount}
+                onChangeText={setDeleteConfirmText}
+                placeholder={t.deleteAccountFinalPlaceholder}
+                style={styles.input}
+                value={deleteConfirmText}
+              />
+              <Pressable
+                disabled={deletingAccount || !isDeleteConfirmText(deleteConfirmText)}
+                onPress={handleDeleteAccount}
+                style={[
+                  styles.dangerButton,
+                  (deletingAccount || !isDeleteConfirmText(deleteConfirmText)) && styles.disabledButton,
+                ]}>
+                {deletingAccount ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <Text allowFontScaling={false} style={styles.logoutText}>
+                    {t.deleteAccountConfirm}
+                  </Text>
+                )}
+              </Pressable>
+              <Pressable disabled={deletingAccount} onPress={() => setMode('menu')} style={styles.outlineButton}>
+                <Text allowFontScaling={false} style={styles.outlineButtonText}>
+                  {t.cancel}
+                </Text>
+              </Pressable>
+            </View>
+          ) : (
+            <>
+              <SettingsSection title="Account">
+                <SettingsRow
+                  icon="user"
+                  title="My Account"
+                  subtitle={accountSubtitle}
+                  onPress={() => setMode('edit')}
+                  showDivider={false}
+                />
+              </SettingsSection>
+
+              <SettingsSection title="App Settings">
+                <SettingsRow icon="globe" title={t.language} rightValue={languageLabel} onPress={() => setMode('language')} />
+                <SettingsRow
+                  icon="bell"
+                  title={language === 'ko' ? '알림 설정' : 'Notification Settings'}
+                  rightValue={notificationStatusText}
+                  onPress={() => setMode('notifications')}
+                />
+                <SettingsRow
+                  icon="trash-2"
+                  title={language === 'ko' ? '캐시 지우기' : 'Clear Cache'}
+                  rightValue={clearingCache ? (language === 'ko' ? '정리 중' : 'Clearing') : undefined}
+                  onPress={handleClearCache}
+                  showDivider={false}
+                />
+              </SettingsSection>
+
+              <SettingsSection title="Support">
+                <SettingsRow
+                  icon="volume-2"
+                  title={language === 'ko' ? '공지사항' : 'Notices'}
+                  onPress={() => setMode('notices')}
+                />
+                <SettingsRow
+                  icon="mail"
+                  title={language === 'ko' ? '문의 / 지원' : 'Contact / Support'}
+                  onPress={handleOpenSupportEmail}
+                />
+                <SettingsRow icon="shield" title={t.privacyPolicy} onPress={openPrivacyPolicy} showDivider={false} />
+              </SettingsSection>
+
+              <SettingsSection title="Danger Zone">
+                <SettingsRow danger icon="user-x" title={t.deleteAccount} onPress={() => setMode('deleteIntro')} showDivider={false} />
+              </SettingsSection>
+
+              <Pressable accessibilityRole="button" onPress={handleLogout} style={styles.settingsFooterButton}>
+                <Text allowFontScaling={false} style={styles.settingsFooterButtonText}>
                   {t.logout}
                 </Text>
               </Pressable>
             </>
           )}
-        </Pressable>
-      </Pressable>
+        </ScrollView>
+      </SafeAreaView>
     </Modal>
   );
+}
+
+function SettingsSection({ children, title }: { children: React.ReactNode; title: string }) {
+  return (
+    <View style={styles.settingsSection}>
+      <Text allowFontScaling={false} style={styles.settingsSectionTitle}>
+        {title}
+      </Text>
+      <View style={styles.settingsList}>{children}</View>
+    </View>
+  );
+}
+
+function SettingsRow({
+  danger,
+  icon,
+  onPress,
+  rightValue,
+  showDivider = true,
+  subtitle,
+  title,
+}: {
+  danger?: boolean;
+  icon?: FeatherIconName;
+  onPress: () => void;
+  rightValue?: string;
+  showDivider?: boolean;
+  subtitle?: string;
+  title: string;
+}) {
+  return (
+    <Pressable accessibilityRole="button" onPress={onPress} style={[styles.settingsRow, !showDivider && styles.settingsRowLast]}>
+      {icon ? (
+        <View style={[styles.settingsRowIcon, danger && styles.settingsRowDangerIcon]}>
+          <Feather name={icon} size={18} color={danger ? '#C9342C' : '#4A4A4D'} />
+        </View>
+      ) : null}
+      <View style={styles.settingsRowTextWrap}>
+        <Text allowFontScaling={false} numberOfLines={1} style={[styles.settingsRowTitle, danger && styles.settingsRowDangerText]}>
+          {title}
+        </Text>
+        {subtitle ? (
+          <Text allowFontScaling={false} numberOfLines={1} style={styles.settingsRowSubtitle}>
+            {subtitle}
+          </Text>
+        ) : null}
+      </View>
+      {rightValue ? (
+        <Text allowFontScaling={false} numberOfLines={1} style={styles.settingsRowValue}>
+          {rightValue}
+        </Text>
+      ) : null}
+      <Feather name="chevron-right" size={19} color="#C7C7CC" style={styles.settingsRowChevron} />
+    </Pressable>
+  );
+}
+
+function NotificationToggleRow({
+  disabled,
+  onValueChange,
+  showDivider = true,
+  subtitle,
+  title,
+  value,
+}: {
+  disabled?: boolean;
+  onValueChange: (value: boolean) => void;
+  showDivider?: boolean;
+  subtitle: string;
+  title: string;
+  value: boolean;
+}) {
+  return (
+    <View style={[styles.notificationToggleRow, !showDivider && styles.settingsRowLast, disabled && styles.notificationToggleRowDisabled]}>
+      <View style={styles.notificationToggleTextWrap}>
+        <Text allowFontScaling={false} style={styles.notificationToggleTitle}>
+          {title}
+        </Text>
+        <Text allowFontScaling={false} style={styles.notificationToggleSubtitle}>
+          {subtitle}
+        </Text>
+      </View>
+      <Switch
+        disabled={disabled}
+        ios_backgroundColor="#D1D1D6"
+        onValueChange={onValueChange}
+        thumbColor="#FFFFFF"
+        trackColor={{ false: '#D1D1D6', true: '#34C759' }}
+        value={value}
+      />
+    </View>
+  );
+}
+
+function useImageSize(image?: string): ImageSize | null {
+  const [size, setSize] = React.useState<ImageSize | null>(null);
+
+  React.useEffect(() => {
+    let mounted = true;
+    setSize(null);
+
+    if (!image) {
+      return;
+    }
+
+    Image.getSize(
+      image,
+      (width, height) => {
+        if (mounted) {
+          setSize({ height, width });
+          console.log('[photo] display image size', { uri: image, width, height });
+        }
+      },
+      (error) => {
+        console.warn('[photo] display image size lookup failed', { uri: image, error });
+      }
+    );
+
+    return () => {
+      mounted = false;
+    };
+  }, [image]);
+
+  return size;
+}
+
+function calculateImageHeight(slotWidth: number, size: ImageSize | null, fallbackHeight: number) {
+  if (slotWidth <= 0 || !size || size.width <= 0 || size.height <= 0) {
+    return fallbackHeight;
+  }
+
+  return slotWidth * (size.height / size.width);
+}
+
+function isDeleteConfirmText(value: string) {
+  const normalized = value.trim();
+  return normalized === 'DELETE' || normalized === '삭제' || normalized === 'ì‚­ì œ';
 }
 
 function LanguageButton({ active, disabled, label, onPress }: { active: boolean; disabled: boolean; label: string; onPress: () => void }) {
@@ -1121,9 +2278,41 @@ function AuthScreen({ language }: { language: Language }) {
   const [email, setEmail] = React.useState('');
   const [password, setPassword] = React.useState('');
   const [loading, setLoading] = React.useState(false);
+  const [socialLoading, setSocialLoading] = React.useState<'google' | 'apple' | null>(null);
+  const [appleAvailable, setAppleAvailable] = React.useState(false);
+  const authSubmittingRef = React.useRef(false);
+  const isSubmitting = loading || Boolean(socialLoading);
+
+  React.useEffect(() => {
+    let mounted = true;
+
+    if (Platform.OS !== 'ios') {
+      return;
+    }
+
+    AppleAuthentication.isAvailableAsync()
+      .then((available) => {
+        if (mounted) {
+          setAppleAvailable(available);
+        }
+      })
+      .catch((error) => {
+        console.warn('apple auth availability check failed', error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const submit = async () => {
+    if (authSubmittingRef.current) {
+      return;
+    }
+
+    authSubmittingRef.current = true;
     if (!email.trim() || password.length < 6) {
+      authSubmittingRef.current = false;
       Alert.alert(t.confirm, language === 'ko' ? '이메일과 6자리 이상의 비밀번호가 필요해요.' : 'Email and a password of at least 6 characters are required.');
       return;
     }
@@ -1137,9 +2326,62 @@ function AuthScreen({ language }: { language: Language }) {
         Alert.alert(t.completeSignup, t.signupPrompt);
       }
     } catch (error) {
-      Alert.alert(t.authError, error instanceof Error ? error.message : t.confirm);
+      console.error('auth failed', error);
+      Alert.alert(t.authError, t.unknownError);
     } finally {
+      authSubmittingRef.current = false;
       setLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    if (authSubmittingRef.current) {
+      return;
+    }
+
+    authSubmittingRef.current = true;
+    setSocialLoading('google');
+    try {
+      await signInWithGoogle();
+    } catch (error) {
+      console.error('google sign-in failed', error);
+      Alert.alert(t.socialSignInFailed, t.tryAgain);
+    } finally {
+      authSubmittingRef.current = false;
+      setSocialLoading(null);
+    }
+  };
+
+  const handleAppleSignIn = async () => {
+    if (authSubmittingRef.current) {
+      return;
+    }
+
+    authSubmittingRef.current = true;
+    setSocialLoading('apple');
+    try {
+      const credential = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+        ],
+      });
+
+      if (!credential.identityToken) {
+        throw new Error('missing_apple_identity_token');
+      }
+
+      await signInWithAppleIdToken(credential.identityToken);
+    } catch (error) {
+      if (isAppleAuthCanceled(error)) {
+        return;
+      }
+
+      console.error('apple sign-in failed', error);
+      Alert.alert(t.socialSignInFailed, t.tryAgain);
+    } finally {
+      authSubmittingRef.current = false;
+      setSocialLoading(null);
     }
   };
 
@@ -1153,9 +2395,9 @@ function AuthScreen({ language }: { language: Language }) {
           <Text allowFontScaling={false} style={styles.authTitle}>
             {mode === 'login' ? t.login : t.signup}
           </Text>
-          <TextInput autoCapitalize="none" keyboardType="email-address" onChangeText={setEmail} placeholder="email@example.com" style={styles.input} value={email} />
-          <TextInput onChangeText={setPassword} placeholder={t.password} secureTextEntry style={styles.input} value={password} />
-          <Pressable disabled={loading} onPress={submit} style={[styles.primaryButton, loading && styles.disabledButton]}>
+          <TextInput autoCapitalize="none" editable={!isSubmitting} keyboardType="email-address" onChangeText={setEmail} placeholder="email@example.com" style={styles.input} value={email} />
+          <TextInput editable={!isSubmitting} onChangeText={setPassword} placeholder={t.password} secureTextEntry style={styles.input} value={password} />
+          <Pressable disabled={isSubmitting} onPress={submit} style={[styles.primaryButton, isSubmitting && styles.disabledButton]}>
             {loading ? (
               <ActivityIndicator color="#FFFFFF" />
             ) : (
@@ -1164,7 +2406,41 @@ function AuthScreen({ language }: { language: Language }) {
               </Text>
             )}
           </Pressable>
-          <Pressable onPress={() => setMode(mode === 'login' ? 'signup' : 'login')}>
+          <View style={styles.socialAuthGroup}>
+            <Pressable
+              disabled={isSubmitting}
+              onPress={handleGoogleSignIn}
+              style={[styles.socialAuthButton, isSubmitting && styles.disabledButton]}>
+              {socialLoading === 'google' ? (
+                <ActivityIndicator color="#111111" />
+              ) : (
+                <>
+                  <Feather name="chrome" size={19} color="#111111" />
+                  <Text allowFontScaling={false} style={styles.socialAuthButtonText}>
+                    {t.continueWithGoogle}
+                  </Text>
+                </>
+              )}
+            </Pressable>
+            {appleAvailable ? (
+              <Pressable
+                disabled={isSubmitting}
+                onPress={handleAppleSignIn}
+                style={[styles.socialAuthButton, styles.appleAuthButton, isSubmitting && styles.disabledButton]}>
+                {socialLoading === 'apple' ? (
+                  <ActivityIndicator color="#FFFFFF" />
+                ) : (
+                  <>
+                    <Feather name="smartphone" size={19} color="#FFFFFF" />
+                    <Text allowFontScaling={false} style={[styles.socialAuthButtonText, styles.appleAuthButtonText]}>
+                      {t.continueWithApple}
+                    </Text>
+                  </>
+                )}
+              </Pressable>
+            ) : null}
+          </View>
+          <Pressable disabled={isSubmitting} onPress={() => setMode(mode === 'login' ? 'signup' : 'login')}>
             <Text allowFontScaling={false} style={styles.secondaryAction}>
               {mode === 'login' ? (language === 'ko' ? '계정 만들기' : 'Create account') : language === 'ko' ? '이미 계정이 있어요' : 'I already have an account'}
             </Text>
@@ -1190,7 +2466,7 @@ function ProfileSetupScreen({
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={styles.scrollContent}>
+      <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
         <View style={styles.header}>
           <Text allowFontScaling={false} style={styles.logo}>
             DAYDROP
@@ -1203,7 +2479,7 @@ function ProfileSetupScreen({
           {t.enterProfile}
         </Text>
         <View style={styles.missionCard}>
-          <ProfileForm initialLanguage={language} profile={profile} t={t} onSaved={onSaved} />
+          <ProfileForm initialLanguage={language} profile={profile} onSaved={onSaved} />
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -1215,32 +2491,49 @@ function ProfileForm({
   onCancel,
   onSaved,
   profile,
-  t,
 }: {
   initialLanguage: Language;
   onCancel?: () => void;
   onSaved: (profile: Profile) => Promise<void>;
   profile: Profile | null;
-  t: Copy;
 }) {
+  const initialCountryCode = findCountryOption(profile?.country)?.code ?? null;
   const [displayName, setDisplayName] = React.useState(profile?.display_name ?? '');
-  const [country, setCountry] = React.useState(profile?.country ?? '');
+  const [countryCode, setCountryCode] = React.useState<string | null>(initialCountryCode);
+  const [countryQuery, setCountryQuery] = React.useState(initialCountryCode ? getCountryLabel(initialCountryCode, initialLanguage) : profile?.country ?? '');
+  const [countryPickerOpen, setCountryPickerOpen] = React.useState(false);
   const [city, setCity] = React.useState(profile?.city ?? '');
-  const [timezone, setTimezone] = React.useState(profile?.timezone ?? getDeviceTimezone());
   const [preferredLanguage, setPreferredLanguage] = React.useState<Language>(normalizeLanguage(profile?.preferred_language ?? initialLanguage));
   const [saving, setSaving] = React.useState(false);
+  const formT = getTranslations(preferredLanguage);
+  const countryOptions = searchCountryOptions(countryQuery);
+
+  React.useEffect(() => {
+    if (!countryCode) {
+      return;
+    }
+
+    setCountryQuery(getCountryLabel(countryCode, preferredLanguage));
+  }, [countryCode, preferredLanguage]);
 
   const save = async () => {
-    if (!displayName.trim() || !country.trim() || !city.trim() || !timezone.trim()) {
-      Alert.alert(t.confirm, `${t.name}, ${t.country}, ${t.city}, ${t.timezone}`);
+    if (!displayName.trim() || !countryCode || !city.trim()) {
+      const missing = [
+        !displayName.trim() ? formT.name : null,
+        !countryCode ? formT.selectCountry : null,
+        !city.trim() ? formT.city : null,
+      ]
+        .filter(Boolean)
+        .join(', ');
+
+      Alert.alert(formT.confirm, missing);
       return;
     }
 
     const input: ProfileInput = {
       displayName,
-      country,
+      country: countryCode,
       city,
-      timezone,
       preferredLanguage,
     };
 
@@ -1248,7 +2541,8 @@ function ProfileForm({
     try {
       await onSaved(await completeProfile(input));
     } catch (error) {
-      Alert.alert(t.profileSaveError, error instanceof Error ? error.message : t.confirm);
+      console.error('profile save failed', error);
+      Alert.alert(formT.profileSaveError, formT.unknownError);
     } finally {
       setSaving(false);
     }
@@ -1256,17 +2550,71 @@ function ProfileForm({
 
   return (
     <View>
-      <TextInput onChangeText={setDisplayName} placeholder={t.name} style={styles.input} value={displayName} />
-      <TextInput onChangeText={setCountry} placeholder={t.country} style={styles.input} value={country} />
-      <TextInput onChangeText={setCity} placeholder={t.city} style={styles.input} value={city} />
-      <TextInput autoCapitalize="none" onChangeText={setTimezone} placeholder={t.timezone} style={styles.input} value={timezone} />
+      <TextInput onChangeText={setDisplayName} placeholder={formT.name} style={styles.input} value={displayName} />
+      <View style={styles.countryPickerWrap}>
+        <TextInput
+          autoCorrect={false}
+          onChangeText={(text) => {
+            const selectedLabel = countryCode ? getCountryLabel(countryCode, preferredLanguage) : '';
+
+            setCountryQuery(text);
+            setCountryPickerOpen(true);
+
+            if (!selectedLabel || text.trim().toLowerCase() !== selectedLabel.trim().toLowerCase()) {
+              setCountryCode(null);
+            }
+          }}
+          onFocus={() => setCountryPickerOpen(true)}
+          placeholder={formT.searchCountry}
+          style={[styles.input, countryPickerOpen && styles.countryInputOpen]}
+          value={countryQuery}
+        />
+        {countryPickerOpen ? (
+          <View style={styles.countryList}>
+            <ScrollView keyboardShouldPersistTaps="handled" nestedScrollEnabled style={styles.countryListScroll}>
+              {countryOptions.length === 0 ? (
+                <Text allowFontScaling={false} style={styles.countryEmptyText}>
+                  {formT.countryNotFound}
+                </Text>
+              ) : (
+                countryOptions.map((option, index) => {
+                  const label = getCountryLabel(option.code, preferredLanguage);
+                  const selected = option.code === countryCode;
+
+                  return (
+                    <Pressable
+                      key={option.code}
+                      onPress={() => {
+                        setCountryCode(option.code);
+                        setCountryQuery(label);
+                        setCountryPickerOpen(false);
+                      }}
+                      style={[styles.countryOption, index === 0 && styles.countryOptionFirst]}>
+                      <Text allowFontScaling={false} style={styles.countryOptionText}>
+                        {label}
+                      </Text>
+                      <View style={styles.countryOptionMeta}>
+                        <Text allowFontScaling={false} style={styles.countryOptionCode}>
+                          {option.code}
+                        </Text>
+                        {selected ? <Feather name="check" size={16} color="#111111" /> : null}
+                      </View>
+                    </Pressable>
+                  );
+                })
+              )}
+            </ScrollView>
+          </View>
+        ) : null}
+      </View>
+      <TextInput onChangeText={setCity} placeholder={formT.city} style={styles.input} value={city} />
       <View style={styles.languageRow}>
         <Text allowFontScaling={false} style={styles.infoLabel}>
-          {t.language}
+          {formT.language}
         </Text>
         <View style={styles.segment}>
-          <LanguageButton active={preferredLanguage === 'ko'} disabled={saving} label={t.korean} onPress={() => setPreferredLanguage('ko')} />
-          <LanguageButton active={preferredLanguage === 'en'} disabled={saving} label={t.english} onPress={() => setPreferredLanguage('en')} />
+          <LanguageButton active={preferredLanguage === 'ko'} disabled={saving} label={formT.korean} onPress={() => setPreferredLanguage('ko')} />
+          <LanguageButton active={preferredLanguage === 'en'} disabled={saving} label={formT.english} onPress={() => setPreferredLanguage('en')} />
         </View>
       </View>
       <Pressable disabled={saving} onPress={save} style={[styles.primaryButton, saving && styles.disabledButton]}>
@@ -1274,14 +2622,14 @@ function ProfileForm({
           <ActivityIndicator color="#FFFFFF" />
         ) : (
           <Text allowFontScaling={false} style={styles.primaryButtonText}>
-            {t.save}
+            {formT.save}
           </Text>
         )}
       </Pressable>
       {onCancel ? (
         <Pressable onPress={onCancel} style={styles.outlineButton}>
           <Text allowFontScaling={false} style={styles.outlineButtonText}>
-            {t.cancel}
+            {formT.cancel}
           </Text>
         </Pressable>
       ) : null}
@@ -1290,15 +2638,19 @@ function ProfileForm({
 }
 
 function CoupleConnectScreen({
+  currentPartnerType,
   inviteCode,
   language,
+  onClose,
   onConnected,
   onLogout,
   pending,
   profile,
 }: {
+  currentPartnerType: PartnerType | null;
   inviteCode: string | null;
   language: Language;
+  onClose?: () => void;
   onConnected: () => Promise<void>;
   onLogout: () => Promise<void>;
   pending: boolean;
@@ -1307,21 +2659,32 @@ function CoupleConnectScreen({
   const t = getTranslations(language);
   const [code, setCode] = React.useState('');
   const [createdCode, setCreatedCode] = React.useState(inviteCode);
-  const [relationshipStartDate, setRelationshipStartDate] = React.useState(new Date().toISOString().slice(0, 10));
+  const [createdPartnerType, setCreatedPartnerType] = React.useState(currentPartnerType);
   const [loading, setLoading] = React.useState(false);
+  const [partnerType, setPartnerType] = React.useState<PartnerType | null>(null);
+  const canShowCreatedCode = Boolean(createdCode && createdPartnerType);
 
   React.useEffect(() => {
     setCreatedCode(inviteCode);
-  }, [inviteCode]);
+    setCreatedPartnerType(currentPartnerType);
+    setPartnerType(null);
+  }, [currentPartnerType, inviteCode]);
 
   const createInvite = async () => {
+    if (!partnerType) {
+      Alert.alert(t.confirm, t.partnerTypeRequired);
+      return;
+    }
+
     setLoading(true);
     try {
-      const nextCode = await createCoupleInvite(relationshipStartDate);
+      const nextCode = await createCoupleInvite(partnerType);
       setCreatedCode(nextCode);
+      setCreatedPartnerType(partnerType);
       await onConnected();
     } catch (error) {
-      Alert.alert(t.inviteCodeError, error instanceof Error ? error.message : t.confirm);
+      console.error('create invite failed', error);
+      Alert.alert(t.inviteCodeError, t.unknownError);
     } finally {
       setLoading(false);
     }
@@ -1337,8 +2700,10 @@ function CoupleConnectScreen({
     try {
       await joinCoupleByInviteCode(code);
       await onConnected();
+      onClose?.();
     } catch (error) {
-      Alert.alert(t.joinError, error instanceof Error ? error.message : t.confirm);
+      console.error('join invite failed', error);
+      Alert.alert(t.joinError, t.unknownError);
     } finally {
       setLoading(false);
     }
@@ -1351,8 +2716,8 @@ function CoupleConnectScreen({
           <Text allowFontScaling={false} style={styles.logo}>
             DAYDROP
           </Text>
-          <Pressable hitSlop={12} onPress={onLogout}>
-            <Feather name="log-out" size={25} color="#050505" />
+          <Pressable hitSlop={12} onPress={onClose ?? onLogout}>
+            <Feather name={onClose ? 'x' : 'log-out'} size={25} color="#050505" />
           </Pressable>
         </View>
         <Text allowFontScaling={false} style={styles.sectionTitle}>
@@ -1368,12 +2733,15 @@ function CoupleConnectScreen({
           <Text allowFontScaling={false} style={styles.connectBody}>
             {t.inviteBody}
           </Text>
-          <InfoLine label={t.profile} value={[profile.display_name, profile.city, profile.country].filter(Boolean).join(' · ')} />
+          <InfoLine
+            label={t.profile}
+            value={[profile.display_name, formatLocationValue(profile.city, profile.country, language)].filter(Boolean).join(' · ')}
+          />
 
-          {createdCode ? (
+          {canShowCreatedCode ? (
             <Pressable
               onPress={async () => {
-                await Clipboard.setStringAsync(createdCode);
+                await Clipboard.setStringAsync(createdCode!);
                 Alert.alert(t.copyDone, t.inviteCode);
               }}
               style={styles.inviteCodeBox}>
@@ -1386,15 +2754,14 @@ function CoupleConnectScreen({
             </Pressable>
           ) : (
             <>
-              <TextInput
-                autoCapitalize="none"
-                onChangeText={setRelationshipStartDate}
-                placeholder="YYYY-MM-DD"
-                style={styles.input}
-                value={relationshipStartDate}
+              <PartnerTypeSelector
+                disabled={loading}
+                partnerType={partnerType}
+                setPartnerType={setPartnerType}
+                t={t}
               />
-              <Pressable disabled={loading} onPress={createInvite} style={[styles.primaryButton, loading && styles.disabledButton]}>
-                <Text allowFontScaling={false} style={styles.primaryButtonText}>
+              <Pressable disabled={loading || !partnerType} onPress={createInvite} style={[styles.primaryButton, (loading || !partnerType) && styles.disabledButton]}>
+                <Text allowFontScaling={false} style={[styles.primaryButtonText, !partnerType && styles.disabledButtonText]}>
                   {t.createInvite}
                 </Text>
               </Pressable>
@@ -1412,6 +2779,64 @@ function CoupleConnectScreen({
         </View>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function isAppleAuthCanceled(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ERR_REQUEST_CANCELED';
+}
+
+function PartnerTypeSelector({
+  disabled,
+  partnerType,
+  setPartnerType,
+  t,
+}: {
+  disabled: boolean;
+  partnerType: PartnerType | null;
+  setPartnerType: (partnerType: PartnerType) => void;
+  t: Copy;
+}) {
+  return (
+    <View style={styles.partnerTypeWrap}>
+      <Text allowFontScaling={false} style={styles.partnerTypeLabel}>
+        {t.partnerTypePrompt}
+      </Text>
+      <View style={styles.partnerTypeSegment}>
+        <PartnerTypeButton
+          active={partnerType === 'couple'}
+          disabled={disabled}
+          label={t.partnerTypeLover}
+          onPress={() => setPartnerType('couple')}
+        />
+        <PartnerTypeButton
+          active={partnerType === 'friend'}
+          disabled={disabled}
+          label={t.partnerTypeFriend}
+          onPress={() => setPartnerType('friend')}
+        />
+      </View>
+    </View>
+  );
+}
+
+function PartnerTypeButton({
+  active,
+  disabled,
+  label,
+  onPress,
+}: {
+  active: boolean;
+  disabled: boolean;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable disabled={disabled} onPress={onPress} style={[styles.partnerTypeButton, active && styles.partnerTypeButtonActive]}>
+      <Text allowFontScaling={false} style={[styles.partnerTypeButtonText, active && styles.partnerTypeButtonTextActive]}>
+        {label}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -1441,6 +2866,11 @@ type SplitMembers = {
   partner: CoupleMember | null;
 };
 
+type SplitSubmissions<T extends DropSubmission> = {
+  mine: T | null;
+  partner: T | null;
+};
+
 function splitMembers(members: CoupleMember[], myUserId: string): SplitMembers {
   return {
     me: members.find((member) => member.user_id === myUserId) ?? null,
@@ -1448,18 +2878,39 @@ function splitMembers(members: CoupleMember[], myUserId: string): SplitMembers {
   };
 }
 
+function splitSubmissions<T extends DropSubmission>(submissions: T[], myUserId: string): SplitSubmissions<T> {
+  let mine: T | null = null;
+  let partner: T | null = null;
+
+  for (const submission of submissions) {
+    if (!mine && submission.user_id === myUserId) {
+      mine = submission;
+    } else if (!partner && submission.user_id !== myUserId) {
+      partner = submission;
+    }
+
+    if (mine && partner) {
+      break;
+    }
+  }
+
+  return { mine, partner };
+}
+
 function displayMemberName(member: CoupleMember | null, fallback: string) {
   return member?.display_name?.trim() || fallback;
 }
 
-function buildMeta(members: SplitMembers, dayLabel: string | null, t: Copy) {
-  const partnerLocation = formatLocation(members.partner, t.cityFallbackPartner);
-  const myLocation = formatLocation(members.me, t.cityFallbackMe);
-  return `${partnerLocation} ↔ ${myLocation}${dayLabel ? ` · ${dayLabel}` : ` · ${t.dayNotSet}`}`;
+function buildMeta(members: SplitMembers, language: Language, t: Copy) {
+  const partnerLocation = formatLocation(members.partner, language, t.cityFallbackPartner);
+  const myLocation = formatLocation(members.me, language, t.cityFallbackMe);
+  if (!members.partner) {
+    return myLocation;
+  }
+  return `${partnerLocation} ↔ ${myLocation}`;
 }
-
-function formatLocation(member: CoupleMember | null, fallback: string) {
-  return [member?.city, member?.country].filter(Boolean).join(', ') || fallback;
+function formatLocation(member: CoupleMember | null, language: Language, fallback: string) {
+  return formatLocationValue(member?.city, member?.country, language) || fallback;
 }
 
 function getMissionPrompt(mission: Pick<TodayDropPayload['mission'], 'prompt_ko' | 'prompt_en'> | null | undefined, language: Language) {
@@ -1467,6 +2918,11 @@ function getMissionPrompt(mission: Pick<TodayDropPayload['mission'], 'prompt_ko'
     return language === 'ko' ? '오늘의 Mission' : "Today's Mission";
   }
   return language === 'en' ? mission.prompt_en || mission.prompt_ko : mission.prompt_ko || mission.prompt_en || "Today's Mission";
+}
+
+function getSoloSendMessage(mission: Pick<TodayDropPayload['mission'], 'prompt_ko' | 'prompt_en'> | null | undefined, language: Language) {
+  const prompt = getMissionPrompt(mission, language);
+  return language === 'ko' ? prompt.replace(/[.ã€‚!?ï¼ï¼Ÿ]+$/u, '') : prompt;
 }
 
 function formatDate(value: string, language: Language) {
@@ -1478,12 +2934,9 @@ function formatDate(value: string, language: Language) {
   }).format(date);
 }
 
-function getDeviceTimezone() {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Seoul';
-  } catch {
-    return 'Asia/Seoul';
-  }
+function formatLocationValue(city: string | null | undefined, country: string | null | undefined, language: Language) {
+  const countryLabel = getCountryLabel(country, language);
+  return [city?.trim(), countryLabel].filter(Boolean).join(', ');
 }
 
 function sideRadius(side: 'left' | 'right') {
@@ -1520,11 +2973,282 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 25,
   },
+  cameraScreen: {
+    backgroundColor: '#000000',
+    flex: 1,
+  },
+  cameraHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingTop: 14,
+  },
+  cameraIconButton: {
+    alignItems: 'center',
+    height: 46,
+    justifyContent: 'center',
+    width: 46,
+  },
+  cameraTitleWrap: {
+    alignItems: 'center',
+    flex: 1,
+    paddingHorizontal: 10,
+  },
+  cameraBrand: {
+    color: '#FFFFFF',
+    fontSize: 25,
+    fontWeight: '800',
+    letterSpacing: 1.5,
+  },
+  cameraMission: {
+    color: 'rgba(255,255,255,0.62)',
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 7,
+    maxWidth: 260,
+  },
+  cameraCentered: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+  },
+  cameraPermission: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 28,
+  },
+  cameraPermissionText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
+    lineHeight: 23,
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  cameraPermissionButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 999,
+    minHeight: 50,
+    justifyContent: 'center',
+    paddingHorizontal: 22,
+  },
+  cameraPermissionButtonText: {
+    color: '#111111',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  cameraSettingsText: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 13,
+    fontWeight: '600',
+    marginTop: 18,
+  },
+  cameraPreviewShell: {
+    borderRadius: 34,
+    flex: 1,
+    marginBottom: 24,
+    marginHorizontal: 16,
+    marginTop: 24,
+    maxHeight: 620,
+    overflow: 'hidden',
+  },
+  cameraPreview: {
+    backgroundColor: '#111111',
+    flex: 1,
+    height: '100%',
+    width: '100%',
+  },
+  cameraPreviewMirrored: {
+    transform: [{ scaleX: -1 }],
+  },
+  cameraControls: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingBottom: 30,
+    paddingHorizontal: 42,
+  },
+  cameraRoundButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 999,
+    height: 52,
+    justifyContent: 'center',
+    width: 52,
+  },
+  shutterButton: {
+    alignItems: 'center',
+    borderColor: '#FFFFFF',
+    borderRadius: 999,
+    borderWidth: 5,
+    height: 86,
+    justifyContent: 'center',
+    width: 86,
+  },
+  shutterInner: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 999,
+    height: 66,
+    width: 66,
+  },
+  cameraControlDisabled: {
+    opacity: 0.55,
+  },
+  cameraConfirmBar: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingBottom: 34,
+    paddingHorizontal: 24,
+  },
+  cameraTextButton: {
+    alignItems: 'center',
+    minHeight: 50,
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  cameraTextButtonLabel: {
+    color: '#FFFFFF',
+    fontSize: 17,
+    fontWeight: '800',
+  },
+  cameraUseButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 999,
+    minHeight: 52,
+    justifyContent: 'center',
+    minWidth: 128,
+    paddingHorizontal: 20,
+  },
+  cameraUseButtonText: {
+    color: '#111111',
+    fontSize: 16,
+    fontWeight: '800',
+  },
   sectionTitle: {
     color: '#050505',
     fontSize: 27,
     fontWeight: '800',
     marginBottom: 14,
+  },
+  missionHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+    position: 'relative',
+    zIndex: 1,
+  },
+  missionHeaderTitle: {
+    marginBottom: 0,
+  },
+  partnerPill: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E7E7E7',
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 6,
+    maxWidth: 150,
+    minHeight: 40,
+    paddingHorizontal: 14,
+  },
+  partnerPillText: {
+    color: '#555555',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  dropdownBackdrop: {
+    flex: 1,
+  },
+  partnerDropdown: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#ECECEC',
+    borderRadius: 15,
+    borderWidth: 1,
+    elevation: 8,
+    padding: 12,
+    position: 'absolute',
+    right: 18,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.13,
+    shadowRadius: 24,
+    top: 176,
+    width: 258,
+  },
+  partnerOption: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    minHeight: 54,
+    paddingHorizontal: 6,
+  },
+  partnerOptionDisabled: {
+    opacity: 0.6,
+  },
+  partnerAvatar: {
+    alignItems: 'center',
+    backgroundColor: '#F1F1F1',
+    borderColor: '#E0E0E0',
+    borderRadius: 18,
+    borderWidth: 1,
+    height: 36,
+    justifyContent: 'center',
+    marginRight: 12,
+    width: 36,
+  },
+  partnerAvatarText: {
+    color: '#555555',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  partnerOptionTextWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  partnerOptionName: {
+    color: '#111111',
+    fontSize: 17,
+    fontWeight: '600',
+  },
+  partnerOptionMeta: {
+    color: '#8A8A8A',
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 3,
+  },
+  partnerDivider: {
+    backgroundColor: '#ECECEC',
+    height: 1,
+    marginHorizontal: 6,
+    marginVertical: 8,
+  },
+  addPartnerCircle: {
+    alignItems: 'center',
+    borderColor: '#D0D0D0',
+    borderRadius: 18,
+    borderWidth: 1,
+    height: 36,
+    justifyContent: 'center',
+    marginRight: 12,
+    width: 36,
+  },
+  addPartnerText: {
+    color: '#6A6A6A',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  partnerEmptyText: {
+    color: '#777777',
+    fontSize: 15,
+    fontWeight: '600',
+    paddingHorizontal: 8,
+    paddingVertical: 14,
   },
   missionCard: {
     backgroundColor: '#FFFFFF',
@@ -1555,20 +3279,26 @@ const styles = StyleSheet.create({
   },
   missionMeta: {
     color: '#777777',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '400',
     marginBottom: 10,
   },
   photoPair: {
+    alignItems: 'flex-start',
     flexDirection: 'row',
     gap: 0,
-    height: 252,
+    overflow: 'hidden',
+    width: '100%',
   },
   dropSlot: {
     alignItems: 'center',
-    flex: 1,
+    flexBasis: '50%',
+    flexGrow: 0,
+    flexShrink: 0,
     justifyContent: 'center',
+    maxWidth: '50%',
     overflow: 'hidden',
+    width: '50%',
   },
   blueSlot: {
     backgroundColor: '#FAFAFA',
@@ -1578,6 +3308,27 @@ const styles = StyleSheet.create({
   },
   waitingSlot: {
     backgroundColor: '#FAFAFA',
+  },
+  prePartnerSlot: {
+    backgroundColor: '#FAFAFA',
+    borderRightColor: '#ECECEC',
+    borderRightWidth: 1,
+    paddingHorizontal: 18,
+  },
+  prePartnerTitle: {
+    color: '#4F4F4F',
+    fontSize: 15,
+    fontWeight: '700',
+    marginTop: 18,
+    textAlign: 'center',
+  },
+  prePartnerBody: {
+    color: '#777777',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18,
+    marginTop: 12,
+    textAlign: 'center',
   },
   waitingContent: {
     alignItems: 'center',
@@ -1592,7 +3343,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   imageSlot: {
-    backgroundColor: '#EAEAEA',
+    backgroundColor: 'transparent',
   },
   fillPressable: {
     flex: 1,
@@ -1731,10 +3482,10 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   stateMessage: {
-    color: '#5F5F5F',
-    fontSize: 15,
+    color: '#666666',
+    fontSize: 14,
     fontWeight: '400',
-    lineHeight: 21,
+    lineHeight: 19,
     marginBottom: 12,
     textAlign: 'center',
   },
@@ -1813,14 +3564,13 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
   },
   recentThumbs: {
+    alignItems: 'flex-start',
     flexDirection: 'row',
-    height: 82,
     marginRight: 14,
     overflow: 'hidden',
-    width: 138,
+    width: RECENT_THUMB_GROUP_WIDTH,
   },
   recentThumb: {
-    height: '100%',
     overflow: 'hidden',
     width: '50%',
   },
@@ -1978,6 +3728,156 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     width: 118,
   },
+  settingsScreen: {
+    backgroundColor: '#FFFFFF',
+    flex: 1,
+  },
+  settingsHeader: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderBottomColor: '#EFEFF4',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    height: 56,
+    paddingHorizontal: 16,
+  },
+  settingsBackButton: {
+    alignItems: 'center',
+    height: 40,
+    justifyContent: 'center',
+    width: 40,
+  },
+  settingsHeaderSpacer: {
+    height: 40,
+    width: 40,
+  },
+  settingsTitle: {
+    color: '#111111',
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  settingsContent: {
+    paddingBottom: 48,
+    paddingHorizontal: 0,
+    paddingTop: 20,
+  },
+  settingsDetail: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+  },
+  settingsSection: {
+    marginBottom: 26,
+  },
+  settingsSectionTitle: {
+    color: '#8E8E93',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.7,
+    marginBottom: 7,
+    marginLeft: 24,
+    textTransform: 'uppercase',
+  },
+  settingsList: {
+    backgroundColor: '#FFFFFF',
+    borderBottomColor: '#EFEFF4',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#EFEFF4',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  settingsRow: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderBottomColor: '#EFEFF4',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    minHeight: 68,
+    paddingHorizontal: 20,
+    paddingVertical: 11,
+  },
+  settingsRowLast: {
+    borderBottomWidth: 0,
+  },
+  settingsRowTextWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  settingsRowIcon: {
+    alignItems: 'center',
+    height: 26,
+    justifyContent: 'center',
+    marginRight: 14,
+    width: 26,
+  },
+  settingsRowDangerIcon: {
+    opacity: 0.95,
+  },
+  settingsRowTitle: {
+    color: '#1C1C1E',
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  settingsRowDangerText: {
+    color: '#C9342C',
+  },
+  settingsRowSubtitle: {
+    color: '#8E8E93',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18,
+    marginTop: 4,
+  },
+  settingsRowValue: {
+    color: '#8E8E93',
+    fontSize: 15,
+    fontWeight: '400',
+    marginLeft: 12,
+    maxWidth: 140,
+    textAlign: 'right',
+  },
+  settingsRowChevron: {
+    marginLeft: 7,
+  },
+  settingsLanguageSheet: {
+    backgroundColor: '#FFFFFF',
+    borderBottomColor: '#EFEFF4',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#EFEFF4',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    overflow: 'hidden',
+  },
+  languageChoiceRow: {
+    alignItems: 'center',
+    borderBottomColor: '#E5E5EA',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 58,
+    paddingHorizontal: 16,
+  },
+  languageChoiceRowLast: {
+    borderBottomWidth: 0,
+  },
+  languageChoiceRowActive: {
+    backgroundColor: '#F8F8FA',
+  },
+  languageChoiceText: {
+    color: '#111111',
+    fontSize: 17,
+    fontWeight: '400',
+  },
+  settingsFooterButton: {
+    alignItems: 'center',
+    marginHorizontal: 20,
+    paddingVertical: 14,
+  },
+  settingsFooterButtonText: {
+    color: '#6D6D72',
+    fontSize: 15,
+    fontWeight: '600',
+  },
   sheetBackdrop: {
     backgroundColor: 'rgba(0, 0, 0, 0.34)',
     flex: 1,
@@ -2053,6 +3953,130 @@ const styles = StyleSheet.create({
     color: '#050505',
     fontSize: 24,
     fontWeight: '800',
+  },
+  centerModalBackdrop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.34)',
+    flex: 1,
+    justifyContent: 'center',
+    padding: 24,
+  },
+  centerModalCard: {
+    backgroundColor: '#FEFDFB',
+    borderRadius: 18,
+    gap: 14,
+    padding: 20,
+    width: '100%',
+  },
+  privacyText: {
+    color: '#555555',
+    fontSize: 15,
+    fontWeight: '500',
+    lineHeight: 22,
+    marginBottom: 14,
+  },
+  privacyHint: {
+    color: '#888888',
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  notificationIntro: {
+    backgroundColor: '#F7F7F9',
+    borderRadius: 8,
+    marginBottom: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+  },
+  notificationIntroText: {
+    color: '#3A3A3C',
+    fontSize: 14,
+    fontWeight: '500',
+    lineHeight: 21,
+  },
+  notificationPermissionBox: {
+    backgroundColor: '#FFF7ED',
+    borderColor: '#FED7AA',
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginBottom: 16,
+    padding: 14,
+  },
+  notificationPermissionTitle: {
+    color: '#9A3412',
+    fontSize: 14,
+    fontWeight: '700',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  notificationSettingsButton: {
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    borderColor: '#D1D1D6',
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    justifyContent: 'center',
+    minHeight: 38,
+    paddingHorizontal: 14,
+  },
+  notificationPermissionRequestButton: {
+    alignSelf: 'stretch',
+    marginBottom: 18,
+  },
+  notificationSettingsButtonText: {
+    color: '#1C1C1E',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  notificationToggleRow: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderBottomColor: '#EFEFF4',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: 14,
+    minHeight: 76,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+  },
+  notificationToggleRowDisabled: {
+    opacity: 0.45,
+  },
+  notificationToggleTextWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  notificationToggleTitle: {
+    color: '#1C1C1E',
+    fontSize: 16,
+    fontWeight: '500',
+  },
+  notificationToggleSubtitle: {
+    color: '#8E8E93',
+    fontSize: 13,
+    fontWeight: '400',
+    lineHeight: 18,
+    marginTop: 4,
+  },
+  notificationMutedHint: {
+    color: '#8E8E93',
+    fontSize: 13,
+    lineHeight: 19,
+    marginTop: -16,
+    paddingHorizontal: 8,
+  },
+  noticeVersion: {
+    color: '#111111',
+    fontSize: 20,
+    fontWeight: '800',
+    marginBottom: 10,
+  },
+  deleteTitle: {
+    color: '#111111',
+    fontSize: 20,
+    fontWeight: '800',
+    lineHeight: 27,
   },
   infoLine: {
     alignItems: 'center',
@@ -2146,6 +4170,113 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     paddingHorizontal: 14,
   },
+  socialAuthGroup: {
+    gap: 10,
+    marginTop: 14,
+  },
+  socialAuthButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#DCDCDC',
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    height: 52,
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+  },
+  socialAuthButtonText: {
+    color: '#111111',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  appleAuthButton: {
+    backgroundColor: '#111111',
+    borderColor: '#111111',
+  },
+  appleAuthButtonText: {
+    color: '#FFFFFF',
+  },
+  dangerButton: {
+    alignItems: 'center',
+    backgroundColor: '#B42318',
+    borderRadius: 10,
+    flexDirection: 'row',
+    gap: 8,
+    height: 52,
+    justifyContent: 'center',
+    marginTop: 12,
+  },
+  dangerOutlineButton: {
+    alignItems: 'center',
+    borderColor: '#B42318',
+    borderRadius: 10,
+    borderWidth: 1,
+    height: 54,
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  dangerText: {
+    color: '#B42318',
+    fontSize: 17,
+    fontWeight: '800',
+  },
+  countryPickerWrap: {
+    marginBottom: 0,
+  },
+  countryInputOpen: {
+    marginBottom: 8,
+  },
+  countryList: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E3E3E3',
+    borderRadius: 10,
+    borderWidth: 1,
+    marginBottom: 12,
+    maxHeight: 224,
+    overflow: 'hidden',
+  },
+  countryListScroll: {
+    maxHeight: 224,
+  },
+  countryEmptyText: {
+    color: '#777777',
+    fontSize: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 16,
+  },
+  countryOption: {
+    alignItems: 'center',
+    borderTopColor: '#F0F0F0',
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    minHeight: 50,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  countryOptionFirst: {
+    borderTopWidth: 0,
+  },
+  countryOptionText: {
+    color: '#111111',
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  countryOptionMeta: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    marginLeft: 12,
+  },
+  countryOptionCode: {
+    color: '#8B8B8B',
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+  },
   connectTitle: {
     color: '#050505',
     fontSize: 23,
@@ -2158,6 +4289,40 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 24,
     marginBottom: 18,
+  },
+  partnerTypeWrap: {
+    marginBottom: 16,
+  },
+  partnerTypeLabel: {
+    color: '#555555',
+    fontSize: 15,
+    fontWeight: '700',
+    marginBottom: 10,
+  },
+  partnerTypeSegment: {
+    backgroundColor: '#EFEFEF',
+    borderRadius: 10,
+    flexDirection: 'row',
+    padding: 3,
+  },
+  partnerTypeButton: {
+    alignItems: 'center',
+    borderRadius: 8,
+    flex: 1,
+    minHeight: 42,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  partnerTypeButtonActive: {
+    backgroundColor: '#111111',
+  },
+  partnerTypeButtonText: {
+    color: '#555555',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  partnerTypeButtonTextActive: {
+    color: '#FFFFFF',
   },
   inviteCodeBox: {
     alignItems: 'center',

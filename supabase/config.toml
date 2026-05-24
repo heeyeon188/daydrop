@@ -1,0 +1,8 @@
+[functions.send-push-notification]
+verify_jwt = false
+
+[functions.notify-couple-event]
+verify_jwt = true
+
+[functions.send-daily-question-push]
+verify_jwt = false
