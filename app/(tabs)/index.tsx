@@ -3446,7 +3446,7 @@ const styles = StyleSheet.create({
   },
   plusCircle: {
     alignItems: 'center',
-    backgroundColor: '#A9A9A9',
+    backgroundColor: '#A99B85',
     borderRadius: 19,
     height: 38,
     justifyContent: 'center',
