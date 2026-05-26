@@ -219,7 +219,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     uploadError: '사진을 업로드하지 못했어요.',
     uploadPhoto: '오늘의 사진 보내기',
     viewAll: '모두 보기',
-    waitingPartner: '상대가 참여하면 Mission 화면이 열려요.',
+    waitingPartner: '상대가 보내지 않았어요',
   },
   en: {
     allDrops: 'All Drops',
@@ -329,7 +329,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     uploadError: 'Could not upload photo',
     uploadPhoto: 'Send today\'s photo',
     viewAll: 'View all',
-    waitingPartner: 'Mission opens when your partner joins.',
+    waitingPartner: 'Your partner has not sent yet.',
   },
 };
 

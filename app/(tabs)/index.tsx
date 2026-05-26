@@ -1068,7 +1068,7 @@ function EmptySlot({
 
   return (
     <Pressable disabled={!onPress} onPress={onPress} style={[styles.dropSlot, toneStyle, styles.emptyPhotoSlot, sideRadius(side), { height }]}>
-      <Feather name={icon} size={30} color={toneColor} strokeWidth={1.6} />
+      <Feather name={icon} size={24} color={toneColor} strokeWidth={1.6} />
       <Text allowFontScaling={false} style={styles.emptyMessage}>
         {message}
       </Text>
@@ -1083,7 +1083,7 @@ function WaitingSlot({ height, label, t }: { height: number; label: string; t: C
   return (
     <View style={[styles.dropSlot, styles.waitingSlot, styles.emptyPhotoSlot, sideRadius('left'), { height }]}>
       <View style={styles.waitingContent}>
-        <Feather name="refresh-cw" size={40} color="#858585" strokeWidth={1.65} />
+        <Feather name="refresh-cw" size={31} color="#858585" strokeWidth={1.65} />
         <Text allowFontScaling={false} style={styles.waitingText}>
           {t.waitingPartner}
         </Text>
@@ -1137,7 +1137,7 @@ function LockedPhotoSlot({ height, image, label, onPress, t }: { height: number;
       <SafeImage blurRadius={24} image={image} label={label} />
       <View pointerEvents="none" style={styles.partnerLockVeil} />
       <View style={[styles.lockContent, styles.partnerLockContent]}>
-        <Feather name="lock" size={26} color="#FFFFFF" strokeWidth={2.1} />
+        <Feather name="lock" size={24} color="#FFFFFF" strokeWidth={2.1} />
         <Text allowFontScaling={false} numberOfLines={2} style={styles.partnerLockText}>
           {t.partnerSent}
         </Text>
@@ -1151,7 +1151,7 @@ function SendSlot({ height, label, message, onPress, t }: { height: number; labe
     <Pressable onPress={onPress} style={[styles.dropSlot, styles.sendSlot, styles.emptyPhotoSlot, sideRadius('right'), { height }]}>
       <View style={styles.innerDashedSlot}>
         <View style={styles.plusCircle}>
-          <Feather name="plus" size={22} color="#FFFFFF" strokeWidth={2.2} />
+          <Feather name="plus" size={20} color="#FFFFFF" strokeWidth={2.2} />
         </View>
         <Text allowFontScaling={false} style={styles.sendText}>
           {message ?? t.sendMine}
@@ -2925,7 +2925,7 @@ function sideRadius(side: 'left' | 'right') {
 
 const styles = StyleSheet.create({
   safeArea: {
-    backgroundColor: '#FEFDFB',
+    backgroundColor: '#FFFCF7',
     flex: 1,
   },
   flex: {
@@ -3231,8 +3231,8 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
   },
   missionCard: {
-    backgroundColor: '#FFFFFF',
-    borderColor: '#ECECEC',
+    backgroundColor: '#FFFDF9',
+    borderColor: '#EFEAE2',
     borderRadius: 15,
     borderWidth: 1,
     elevation: 3,
@@ -3281,18 +3281,20 @@ const styles = StyleSheet.create({
     width: '50%',
   },
   emptyPhotoSlot: {
-    borderColor: '#DDDDDD',
     borderStyle: 'dashed',
     borderWidth: 1,
   },
   blueSlot: {
-    backgroundColor: '#FAFAFA',
+    backgroundColor: '#F5FAFF',
+    borderColor: '#C8D8EA',
   },
   sandSlot: {
-    backgroundColor: '#FAFAFA',
+    backgroundColor: '#FFF9EE',
+    borderColor: '#DED1BD',
   },
   waitingSlot: {
-    backgroundColor: '#FAFAFA',
+    backgroundColor: '#F5FAFF',
+    borderColor: '#C8D8EA',
   },
   prePartnerSlot: {
     backgroundColor: '#FAFAFA',
@@ -3430,7 +3432,8 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   sendSlot: {
-    backgroundColor: '#FAFAFA',
+    backgroundColor: '#FFF9EE',
+    borderColor: '#DED1BD',
     borderWidth: 0,
     padding: 0,
   },
