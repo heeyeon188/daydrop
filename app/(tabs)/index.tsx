@@ -70,6 +70,7 @@ type FeatherIconName = React.ComponentProps<typeof Feather>['name'];
 type FullImage = { canDelete?: boolean; image?: string; label: string; mission: string };
 type DropDetail = { drop: RecentDrop; state: DropState };
 type ImageSize = { height: number; width: number };
+type SafeImageResizeMode = React.ComponentProps<typeof Image>['resizeMode'];
 
 export default function MissionScreen() {
   const { user, loading: sessionLoading, configError } = useSession();
@@ -1065,7 +1066,7 @@ function EmptySlot({
   const toneColor = tone === 'blue' ? '#7890AE' : '#9B8D77';
 
   return (
-    <Pressable disabled={!onPress} onPress={onPress} style={[styles.dropSlot, toneStyle, sideRadius(side), { height }]}>
+    <Pressable disabled={!onPress} onPress={onPress} style={[styles.dropSlot, toneStyle, styles.emptyPhotoSlot, sideRadius(side), { height }]}>
       <Feather name={icon} size={30} color={toneColor} strokeWidth={1.6} />
       <Text allowFontScaling={false} style={styles.emptyMessage}>
         {message}
@@ -1079,7 +1080,7 @@ function EmptySlot({
 
 function WaitingSlot({ height, label, t }: { height: number; label: string; t: Copy }) {
   return (
-    <View style={[styles.dropSlot, styles.waitingSlot, sideRadius('left'), { height }]}>
+    <View style={[styles.dropSlot, styles.waitingSlot, styles.emptyPhotoSlot, sideRadius('left'), { height }]}>
       <View style={styles.waitingContent}>
         <Feather name="refresh-cw" size={40} color="#858585" strokeWidth={1.65} />
         <Text allowFontScaling={false} style={styles.waitingText}>
@@ -1146,7 +1147,7 @@ function LockedPhotoSlot({ height, image, label, onPress, t }: { height: number;
 
 function SendSlot({ height, label, message, onPress, t }: { height: number; label: string; message?: string; onPress: () => void; t: Copy }) {
   return (
-    <Pressable onPress={onPress} style={[styles.dropSlot, styles.sendSlot, sideRadius('right'), { height }]}>
+    <Pressable onPress={onPress} style={[styles.dropSlot, styles.sendSlot, styles.emptyPhotoSlot, sideRadius('right'), { height }]}>
       <View style={styles.innerDashedSlot}>
         <View style={styles.plusCircle}>
           <Feather name="plus" size={22} color="#FFFFFF" strokeWidth={2.2} />
@@ -1162,7 +1163,7 @@ function SendSlot({ height, label, message, onPress, t }: { height: number; labe
   );
 }
 
-function SafeImage({ blurRadius = 0, image, label }: { blurRadius?: number; image?: string; label: string }) {
+function SafeImage({ blurRadius = 0, image, label, resizeMode = 'contain' }: { blurRadius?: number; image?: string; label: string; resizeMode?: SafeImageResizeMode }) {
   const [failed, setFailed] = React.useState(false);
 
   React.useEffect(() => {
@@ -1180,7 +1181,7 @@ function SafeImage({ blurRadius = 0, image, label }: { blurRadius?: number; imag
   return (
     <Image
       blurRadius={blurRadius}
-      resizeMode="contain"
+      resizeMode={resizeMode}
       source={{ uri: image }}
       style={styles.slotImage}
       onError={(event) => {
@@ -1448,8 +1449,8 @@ function DropDetailModal({
             </Pressable>
           </View>
           <View style={styles.detailPhotos}>
-            <DetailPhoto image={partner?.image_url} label={t.partner} locked={shouldLock} />
-            <DetailPhoto image={mine?.image_url} label={t.me} locked={false} />
+            <DetailPhoto image={partner?.image_url} label={t.partner} locked={shouldLock} side="left" />
+            <DetailPhoto image={mine?.image_url} label={t.me} locked={false} side="right" />
           </View>
         </View>
       </View>
@@ -1457,10 +1458,10 @@ function DropDetailModal({
   );
 }
 
-function DetailPhoto({ image, label, locked }: { image?: string; label: string; locked: boolean }) {
+function DetailPhoto({ image, label, locked, side }: { image?: string; label: string; locked: boolean; side: 'left' | 'right' }) {
   return (
-    <View style={styles.detailPhoto}>
-      {image ? <SafeImage blurRadius={locked ? 16 : 0} image={image} label={`detail-${label}`} /> : <View style={styles.detailPlaceholder} />}
+    <View style={[styles.detailPhoto, !image && styles.emptyPhotoSlot, sideRadius(side)]}>
+      {image ? <SafeImage blurRadius={locked ? 16 : 0} image={image} label={`detail-${label}`} resizeMode="cover" /> : <View style={styles.detailPlaceholder} />}
       {locked ? (
         <>
           <MosaicOverlay />
@@ -3299,6 +3300,11 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     width: '50%',
   },
+  emptyPhotoSlot: {
+    borderColor: '#DDDDDD',
+    borderStyle: 'dashed',
+    borderWidth: 1,
+  },
   blueSlot: {
     backgroundColor: '#FAFAFA',
   },
@@ -3917,20 +3923,16 @@ const styles = StyleSheet.create({
   },
   detailPhotos: {
     flexDirection: 'row',
-    gap: 10,
     height: 260,
+    overflow: 'hidden',
   },
   detailPhoto: {
     backgroundColor: '#EFEFEF',
-    borderRadius: 14,
     flex: 1,
     overflow: 'hidden',
   },
   detailPlaceholder: {
     backgroundColor: '#F5F5F5',
-    borderColor: '#DDDDDD',
-    borderStyle: 'dashed',
-    borderWidth: 1,
     height: '100%',
     width: '100%',
   },
