@@ -173,7 +173,7 @@ function MissionContent({
     [coupleOptions, myUserId]
   );
   const partnerCount = partnerOptions.length;
-  const canAddPartner = coupleOptions.length < 4;
+  const canAddPartner = partnerCount < 4;
 
   React.useEffect(() => {
     let mounted = true;
