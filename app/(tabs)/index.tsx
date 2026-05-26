@@ -51,7 +51,6 @@ import { completeProfile, updatePreferredLanguage, type ProfileInput } from '@/s
 import { normalizeCameraPhoto, type CameraFacing, type DaydropPhotoAsset } from '@/services/storage';
 import type { CoupleMember, DropState, DropSubmission, PartnerType, Profile, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
-const MOSAIC_BLOCKS = Array.from({ length: 28 }, (_, index) => index);
 const EMPTY_MEMBERS: CoupleMember[] = [];
 const PERMISSION_INTRO_STORAGE_KEY = 'daydrop.hasSeenPermissionIntro';
 const DEFAULT_PHOTO_PAIR_HEIGHT = 292;
@@ -1192,26 +1191,6 @@ function SafeImage({ blurRadius = 0, image, label, resizeMode = 'contain' }: { b
   );
 }
 
-function MosaicOverlay() {
-  return (
-    <View pointerEvents="none" style={styles.mosaicOverlay}>
-      {MOSAIC_BLOCKS.map((block) => (
-        <View
-          key={block}
-          style={[
-            styles.mosaicBlock,
-            {
-              left: `${(block % 7) * 14.3}%`,
-              opacity: block % 2 === 0 ? 0.28 : 0.16,
-              top: `${Math.floor(block / 7) * 25}%`,
-            },
-          ]}
-        />
-      ))}
-    </View>
-  );
-}
-
 function RecentDropRow({
   drop,
   hasPartner,
@@ -1464,7 +1443,6 @@ function DetailPhoto({ image, label, locked, side }: { image?: string; label: st
       {image ? <SafeImage blurRadius={locked ? 16 : 0} image={image} label={`detail-${label}`} resizeMode="cover" /> : <View style={styles.detailPlaceholder} />}
       {locked ? (
         <>
-          <MosaicOverlay />
           <View style={styles.lockContent}>
             <Feather name="lock" size={28} color="#FFFFFF" />
           </View>
@@ -3404,16 +3382,6 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0, 0, 0, 0.18)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 1,
-  },
-  mosaicOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0, 0, 0, 0.18)',
-  },
-  mosaicBlock: {
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    height: '25%',
-    position: 'absolute',
-    width: '14.3%',
   },
   lockContent: {
     ...StyleSheet.absoluteFillObject,
