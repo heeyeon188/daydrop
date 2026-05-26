@@ -6,6 +6,7 @@ import { CameraView, type CameraType, useCameraPermissions } from 'expo-camera';
 import * as Clipboard from 'expo-clipboard';
 import * as Device from 'expo-device';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as ExpoLinking from 'expo-linking';
 import * as Notifications from 'expo-notifications';
 import React from 'react';
 import {
@@ -20,6 +21,7 @@ import {
   RefreshControl,
   SafeAreaView,
   ScrollView,
+  Share,
   StyleSheet,
   Switch,
   Text,
@@ -53,6 +55,7 @@ import type { CoupleMember, DropState, DropSubmission, PartnerType, Profile, Rec
 
 const EMPTY_MEMBERS: CoupleMember[] = [];
 const PERMISSION_INTRO_STORAGE_KEY = 'daydrop.hasSeenPermissionIntro';
+const PENDING_INVITE_CODE_STORAGE_KEY = 'daydrop.pendingInviteCode';
 const DEFAULT_PHOTO_PAIR_HEIGHT = 292;
 const RECENT_THUMB_GROUP_WIDTH = 138;
 const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
@@ -77,6 +80,44 @@ export default function MissionScreen() {
   const myCouple = useMyCouple(Boolean(user));
   const language = normalizeLanguage(profileState.profile?.preferred_language);
   const t = getTranslations(language);
+  const [pendingInviteCode, setPendingInviteCode] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let mounted = true;
+
+    const savePendingInviteCode = async (url: string | null) => {
+      const nextCode = getInviteCodeFromURL(url);
+      if (!nextCode) {
+        return;
+      }
+
+      setPendingInviteCode(nextCode);
+      try {
+        await AsyncStorage.setItem(PENDING_INVITE_CODE_STORAGE_KEY, nextCode);
+      } catch (nextError) {
+        console.warn('pending invite code save failed', nextError);
+      }
+    };
+
+    ExpoLinking.getInitialURL()
+      .then((url) => {
+        if (mounted) {
+          void savePendingInviteCode(url);
+        }
+      })
+      .catch((nextError) => {
+        console.warn('initial invite link lookup failed', nextError);
+      });
+
+    const subscription = ExpoLinking.addEventListener('url', ({ url }) => {
+      void savePendingInviteCode(url);
+    });
+
+    return () => {
+      mounted = false;
+      subscription.remove();
+    };
+  }, []);
 
   if (sessionLoading) {
     return <CenteredState text={t.loadingApp} />;
@@ -114,12 +155,14 @@ export default function MissionScreen() {
       myCouple={myCouple.couple}
       myUserId={user.id}
       onCoupleChanged={myCouple.refetch}
+      onPendingInviteCodeHandled={() => setPendingInviteCode(null)}
       onLanguageChanged={profileState.setProfile}
       onLogout={signOut}
       onProfileSaved={async (profile) => {
         profileState.setProfile(profile);
         await myCouple.refetch();
       }}
+      pendingInviteCode={pendingInviteCode}
       profile={profileState.profile}
     />
   );
@@ -130,18 +173,22 @@ function MissionContent({
   myCouple,
   myUserId,
   onCoupleChanged,
+  onPendingInviteCodeHandled,
   onLanguageChanged,
   onLogout,
   onProfileSaved,
+  pendingInviteCode,
   profile,
 }: {
   language: Language;
   myCouple: MyCouple | null;
   myUserId: string;
   onCoupleChanged: () => Promise<void>;
+  onPendingInviteCodeHandled: () => void;
   onLanguageChanged: (profile: Profile) => void;
   onLogout: () => Promise<void>;
   onProfileSaved: (profile: Profile) => Promise<void>;
+  pendingInviteCode: string | null;
   profile: Profile;
 }) {
   const t = getTranslations(language);
@@ -157,6 +204,8 @@ function MissionContent({
   const [permissionIntroVisible, setPermissionIntroVisible] = React.useState(false);
   const [photoPairWidth, setPhotoPairWidth] = React.useState(0);
   const [settingsVisible, setSettingsVisible] = React.useState(false);
+  const [storedPendingInviteCode, setStoredPendingInviteCode] = React.useState<string | null>(null);
+  const activePendingInviteCode = pendingInviteCode ?? storedPendingInviteCode;
   const activeMembers = today?.members ?? myCouple?.members ?? EMPTY_MEMBERS;
   const members = React.useMemo(() => splitMembers(activeMembers, myUserId), [activeMembers, myUserId]);
   const state = React.useMemo(() => getDropState(today, myUserId), [today, myUserId]);
@@ -192,6 +241,38 @@ function MissionContent({
       mounted = false;
     };
   }, []);
+
+  React.useEffect(() => {
+    let mounted = true;
+
+    AsyncStorage.getItem(PENDING_INVITE_CODE_STORAGE_KEY)
+      .then((value) => {
+        if (mounted && value) {
+          setStoredPendingInviteCode(normalizeInviteCode(value));
+        }
+      })
+      .catch((nextError) => {
+        console.warn('pending invite code lookup failed', nextError);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (activePendingInviteCode) {
+      setConnectVisible(true);
+    }
+  }, [activePendingInviteCode]);
+
+  const clearPendingInviteCode = React.useCallback(() => {
+    setStoredPendingInviteCode(null);
+    onPendingInviteCodeHandled();
+    AsyncStorage.removeItem(PENDING_INVITE_CODE_STORAGE_KEY).catch((nextError) => {
+      console.warn('pending invite code clear failed', nextError);
+    });
+  }, [onPendingInviteCodeHandled]);
 
   const dismissPermissionIntro = async () => {
     setPermissionIntroVisible(false);
@@ -488,6 +569,7 @@ function MissionContent({
       <Modal animationType="slide" visible={connectVisible} onRequestClose={() => setConnectVisible(false)}>
         <CoupleConnectScreen
           currentPartnerType={myCouple?.couple.partner_type ?? null}
+          initialInviteCode={activePendingInviteCode}
           inviteCode={inviteCode}
           language={language}
           onConnected={async () => {
@@ -495,6 +577,7 @@ function MissionContent({
             await refetch(true);
           }}
           onClose={() => setConnectVisible(false)}
+          onInviteCodeHandled={clearPendingInviteCode}
           onLogout={onLogout}
           pending={Boolean(inviteCode)}
           profile={profile}
@@ -2239,19 +2322,6 @@ function LanguageButton({ active, disabled, label, onPress }: { active: boolean;
   );
 }
 
-function InfoLine({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.infoLine}>
-      <Text allowFontScaling={false} style={styles.infoLabel}>
-        {label}
-      </Text>
-      <Text allowFontScaling={false} numberOfLines={1} style={styles.infoValue}>
-        {value}
-      </Text>
-    </View>
-  );
-}
-
 function AuthScreen({ language }: { language: Language }) {
   const t = getTranslations(language);
   const [mode, setMode] = React.useState<'login' | 'signup'>('login');
@@ -2619,19 +2689,23 @@ function ProfileForm({
 
 function CoupleConnectScreen({
   currentPartnerType,
+  initialInviteCode,
   inviteCode,
   language,
   onClose,
   onConnected,
+  onInviteCodeHandled,
   onLogout,
   pending,
   profile,
 }: {
   currentPartnerType: PartnerType | null;
+  initialInviteCode: string | null;
   inviteCode: string | null;
   language: Language;
   onClose?: () => void;
   onConnected: () => Promise<void>;
+  onInviteCodeHandled: () => void;
   onLogout: () => Promise<void>;
   pending: boolean;
   profile: Profile;
@@ -2642,7 +2716,13 @@ function CoupleConnectScreen({
   const [createdPartnerType, setCreatedPartnerType] = React.useState(currentPartnerType);
   const [loading, setLoading] = React.useState(false);
   const [partnerType, setPartnerType] = React.useState<PartnerType | null>(null);
+  const processedInviteCodeRef = React.useRef<string | null>(null);
   const canShowCreatedCode = Boolean(createdCode && createdPartnerType);
+  const displayPartnerType = canShowCreatedCode ? createdPartnerType : partnerType ?? currentPartnerType ?? null;
+  const connectionLabel = displayPartnerType === 'friend' ? t.partnerTypeFriend : t.partnerTypeLover;
+  const connectTitle = getConnectTitle(displayPartnerType, language);
+  const connectBody = getConnectBody(displayPartnerType, language);
+  const displayName = profile.display_name?.trim() || t.me;
 
   React.useEffect(() => {
     setCreatedCode(inviteCode);
@@ -2670,15 +2750,43 @@ function CoupleConnectScreen({
     }
   };
 
-  const joinInvite = async () => {
-    if (!code.trim()) {
+  const shareInvite = async () => {
+    if (!createdCode || !createdPartnerType) {
+      return;
+    }
+
+    const label = createdPartnerType === 'friend' ? t.partnerTypeFriend : t.partnerTypeLover;
+    const inviteUrl = ExpoLinking.createURL('invite', {
+      queryParams: { code: createdCode },
+    });
+    const message =
+      language === 'ko'
+        ? `${displayName}님이 Daydrop에 ${label}로 초대했어요.\n초대 코드: ${createdCode}\nDaydrop에서 코드를 입력하면 바로 연결돼요.`
+        : `${displayName} invited you to Daydrop as ${label}.\nInvite code: ${createdCode}\nEnter this code in Daydrop to connect.`;
+
+    try {
+      await Share.share({
+        message: `${message}\n${inviteUrl}`,
+        title: language === 'ko' ? 'Daydrop 초대' : 'Daydrop Invite',
+      });
+    } catch (error) {
+      console.error('share invite failed', error);
+      await Clipboard.setStringAsync(createdCode);
+      Alert.alert(t.copyDone, t.inviteCode);
+    }
+  };
+
+  const joinInvite = React.useCallback(async (nextCode = code) => {
+    const normalizedCode = normalizeInviteCode(nextCode);
+    if (!normalizedCode) {
       Alert.alert(t.inviteCode, t.enterInvite);
       return;
     }
 
+    setCode(normalizedCode);
     setLoading(true);
     try {
-      await joinCoupleByInviteCode(code);
+      await joinCoupleByInviteCode(normalizedCode);
       await onConnected();
       onClose?.();
     } catch (error) {
@@ -2687,7 +2795,19 @@ function CoupleConnectScreen({
     } finally {
       setLoading(false);
     }
-  };
+  }, [code, onClose, onConnected, t.enterInvite, t.inviteCode, t.joinError, t.unknownError]);
+
+  React.useEffect(() => {
+    const nextCode = normalizeInviteCode(initialInviteCode);
+    if (!nextCode || processedInviteCodeRef.current === nextCode) {
+      return;
+    }
+
+    processedInviteCodeRef.current = nextCode;
+    setCode(nextCode);
+    onInviteCodeHandled();
+    void joinInvite(nextCode);
+  }, [initialInviteCode, joinInvite, onInviteCodeHandled]);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -2700,38 +2820,68 @@ function CoupleConnectScreen({
             <Feather name={onClose ? 'x' : 'log-out'} size={25} color="#050505" />
           </Pressable>
         </View>
-        <Text allowFontScaling={false} style={styles.sectionTitle}>
-          {t.couple}
+        <Text allowFontScaling={false} style={styles.connectSectionTitle}>
+          {connectionLabel}
         </Text>
-        <View style={styles.missionCard}>
-          <Text allowFontScaling={false} style={styles.dropLabel}>
+        <View style={styles.connectCard}>
+          <Text allowFontScaling={false} style={styles.connectEyebrow}>
             {t.inviteCode}
           </Text>
           <Text allowFontScaling={false} style={styles.connectTitle}>
-            {t.startTogether}
+            {connectTitle}
           </Text>
           <Text allowFontScaling={false} style={styles.connectBody}>
-            {t.inviteBody}
+            {connectBody}
           </Text>
-          <InfoLine
-            label={t.profile}
-            value={[profile.display_name, formatLocationValue(profile.city, profile.country, language)].filter(Boolean).join(' · ')}
-          />
+          <View style={styles.connectProfileRow}>
+            <View style={styles.connectAvatar}>
+              <Text allowFontScaling={false} style={styles.connectAvatarText}>
+                {displayName.slice(0, 1).toUpperCase()}
+              </Text>
+            </View>
+            <View style={styles.connectProfileTextWrap}>
+              <Text allowFontScaling={false} numberOfLines={1} style={styles.connectProfileLabel}>
+                {t.profile}
+              </Text>
+              <Text allowFontScaling={false} numberOfLines={1} style={styles.connectProfileValue}>
+                {[displayName, formatLocationValue(profile.city, profile.country, language)].filter(Boolean).join(' · ')}
+              </Text>
+            </View>
+          </View>
 
           {canShowCreatedCode ? (
-            <Pressable
-              onPress={async () => {
-                await Clipboard.setStringAsync(createdCode!);
-                Alert.alert(t.copyDone, t.inviteCode);
-              }}
-              style={styles.inviteCodeBox}>
-              <Text allowFontScaling={false} style={styles.inviteCode}>
-                {createdCode}
-              </Text>
-              <Text allowFontScaling={false} style={styles.inviteHint}>
-                {t.copyInvite}
-              </Text>
-            </Pressable>
+            <View style={styles.inviteReadyWrap}>
+              <Pressable
+                onPress={async () => {
+                  await Clipboard.setStringAsync(createdCode!);
+                  Alert.alert(t.copyDone, t.inviteCode);
+                }}
+                style={styles.inviteCodeBox}>
+                <Text allowFontScaling={false} style={styles.inviteCode}>
+                  {createdCode}
+                </Text>
+                <Text allowFontScaling={false} style={styles.inviteHint}>
+                  {t.copyInvite}
+                </Text>
+              </Pressable>
+              <View style={styles.inviteActionRow}>
+                <Pressable disabled={loading} onPress={shareInvite} style={[styles.inviteShareButton, loading && styles.disabledButton]}>
+                  <Feather name="share-2" size={18} color="#FFFFFF" />
+                  <Text allowFontScaling={false} style={styles.inviteShareButtonText}>
+                    {language === 'ko' ? '초대 공유하기' : 'Share invite'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  disabled={loading}
+                  onPress={async () => {
+                    await Clipboard.setStringAsync(createdCode!);
+                    Alert.alert(t.copyDone, t.inviteCode);
+                  }}
+                  style={[styles.inviteCopyButton, loading && styles.disabledButton]}>
+                  <Feather name="copy" size={18} color="#111111" />
+                </Pressable>
+              </View>
+            </View>
           ) : (
             <>
               <PartnerTypeSelector
@@ -2748,10 +2898,22 @@ function CoupleConnectScreen({
             </>
           )}
 
-          {pending ? <InlineMessage text={t.waitingPartner} /> : null}
+          {pending ? <InlineMessage text={language === 'ko' ? '초대한 사람이 코드를 입력하면 연결돼요.' : 'Share the code so your person can connect.'} /> : null}
 
-          <TextInput autoCapitalize="characters" onChangeText={setCode} placeholder={t.enterInvite} style={styles.input} value={code} />
-          <Pressable disabled={loading} onPress={joinInvite} style={[styles.outlineButton, loading && styles.disabledButton]}>
+          <View style={styles.joinSection}>
+            <Text allowFontScaling={false} style={styles.joinLabel}>
+              {language === 'ko' ? '받은 코드가 있나요?' : 'Have an invite code?'}
+            </Text>
+            <TextInput
+              autoCapitalize="characters"
+              onChangeText={setCode}
+              placeholder={t.enterInvite}
+              placeholderTextColor="#A6A6A6"
+              style={styles.connectInput}
+              value={code}
+            />
+          </View>
+          <Pressable disabled={loading} onPress={() => joinInvite()} style={[styles.outlineButton, loading && styles.disabledButton]}>
             <Text allowFontScaling={false} style={styles.outlineButtonText}>
               {t.joinByCode}
             </Text>
@@ -2760,6 +2922,40 @@ function CoupleConnectScreen({
       </ScrollView>
     </SafeAreaView>
   );
+}
+
+function getConnectTitle(partnerType: PartnerType | null, language: Language) {
+  if (partnerType === 'friend') {
+    return language === 'ko' ? '친구와 Daydrop을 시작해보세요.' : 'Start Daydrop with a friend.';
+  }
+
+  return language === 'ko' ? '둘만의 Daydrop을 시작해보세요.' : 'Start your private Daydrop.';
+}
+
+function normalizeInviteCode(value: unknown) {
+  return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+function getInviteCodeFromURL(url: string | null) {
+  if (!url) {
+    return '';
+  }
+
+  const parsed = ExpoLinking.parse(url);
+  const code = parsed.queryParams?.code;
+  return normalizeInviteCode(Array.isArray(code) ? code[0] : code);
+}
+
+function getConnectBody(partnerType: PartnerType | null, language: Language) {
+  if (partnerType === 'friend') {
+    return language === 'ko'
+      ? '초대 코드를 공유하면 친구와 같은 Mission을 열고 서로의 하루를 볼 수 있어요.'
+      : 'Share an invite code to open the same Mission and see each other\'s day.';
+  }
+
+  return language === 'ko'
+    ? '한 명이 초대 코드를 만들고, 다른 한 명이 그 코드를 입력하면 오늘의 Mission이 열려요.'
+    : 'One of you creates an invite code. The other enters it to open today\'s Mission.';
 }
 
 function isAppleAuthCanceled(error: unknown) {
@@ -4055,26 +4251,10 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     lineHeight: 27,
   },
-  infoLine: {
-    alignItems: 'center',
-    borderBottomColor: '#ECECEC',
-    borderBottomWidth: 1,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    minHeight: 48,
-  },
   infoLabel: {
     color: '#777777',
     fontSize: 14,
     fontWeight: '600',
-  },
-  infoValue: {
-    color: '#111111',
-    flex: 1,
-    fontSize: 15,
-    fontWeight: '800',
-    marginLeft: 16,
-    textAlign: 'right',
   },
   languageRow: {
     alignItems: 'center',
@@ -4254,39 +4434,107 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.6,
   },
+  connectSectionTitle: {
+    color: '#050505',
+    fontSize: 30,
+    fontWeight: '800',
+    marginBottom: 16,
+  },
+  connectCard: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#ECE8DF',
+    borderRadius: 14,
+    borderWidth: 1,
+    elevation: 4,
+    marginBottom: 12,
+    padding: 20,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.08,
+    shadowRadius: 24,
+  },
+  connectEyebrow: {
+    color: '#8A8A8A',
+    fontSize: 13,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    marginBottom: 12,
+    textTransform: 'uppercase',
+  },
   connectTitle: {
     color: '#050505',
-    fontSize: 23,
+    fontSize: 24,
     fontWeight: '800',
-    lineHeight: 31,
+    lineHeight: 32,
     marginBottom: 10,
   },
   connectBody: {
-    color: '#666666',
+    color: '#5F5F5F',
     fontSize: 16,
     lineHeight: 24,
-    marginBottom: 18,
+    marginBottom: 20,
+  },
+  connectProfileRow: {
+    alignItems: 'center',
+    borderBottomColor: '#EEEEEE',
+    borderBottomWidth: 1,
+    borderTopColor: '#EEEEEE',
+    borderTopWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 20,
+    paddingVertical: 14,
+  },
+  connectAvatar: {
+    alignItems: 'center',
+    backgroundColor: '#111111',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    width: 36,
+  },
+  connectAvatarText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  connectProfileTextWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  connectProfileLabel: {
+    color: '#8A8A8A',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 3,
+  },
+  connectProfileValue: {
+    color: '#111111',
+    fontSize: 15,
+    fontWeight: '800',
   },
   partnerTypeWrap: {
-    marginBottom: 16,
+    marginBottom: 14,
   },
   partnerTypeLabel: {
-    color: '#555555',
-    fontSize: 15,
+    color: '#444444',
+    fontSize: 14,
     fontWeight: '700',
     marginBottom: 10,
   },
   partnerTypeSegment: {
-    backgroundColor: '#EFEFEF',
-    borderRadius: 10,
+    backgroundColor: '#F3F3F3',
+    borderColor: '#E9E9E9',
+    borderRadius: 12,
+    borderWidth: 1,
     flexDirection: 'row',
-    padding: 3,
+    padding: 4,
   },
   partnerTypeButton: {
     alignItems: 'center',
-    borderRadius: 8,
+    borderRadius: 9,
     flex: 1,
-    minHeight: 42,
+    minHeight: 46,
     justifyContent: 'center',
     paddingHorizontal: 12,
   },
@@ -4301,20 +4549,22 @@ const styles = StyleSheet.create({
   partnerTypeButtonTextActive: {
     color: '#FFFFFF',
   },
+  inviteReadyWrap: {
+    gap: 12,
+    marginBottom: 18,
+  },
   inviteCodeBox: {
     alignItems: 'center',
-    backgroundColor: '#F7F7F7',
-    borderColor: '#E1E1E1',
+    backgroundColor: '#F7F7F4',
+    borderColor: '#DAD7CE',
     borderRadius: 12,
     borderStyle: 'dashed',
     borderWidth: 1,
-    marginBottom: 18,
-    marginTop: 12,
-    paddingVertical: 18,
+    paddingVertical: 20,
   },
   inviteCode: {
     color: '#050505',
-    fontSize: 28,
+    fontSize: 30,
     fontWeight: '800',
     letterSpacing: 4,
   },
@@ -4322,6 +4572,56 @@ const styles = StyleSheet.create({
     color: '#777777',
     fontSize: 13,
     marginTop: 6,
+  },
+  inviteActionRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  inviteShareButton: {
+    alignItems: 'center',
+    backgroundColor: '#111111',
+    borderRadius: 10,
+    flex: 1,
+    flexDirection: 'row',
+    gap: 8,
+    height: 52,
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+  },
+  inviteShareButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  inviteCopyButton: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#DADADA',
+    borderRadius: 10,
+    borderWidth: 1,
+    height: 52,
+    justifyContent: 'center',
+    width: 56,
+  },
+  joinSection: {
+    marginTop: 4,
+  },
+  joinLabel: {
+    color: '#555555',
+    fontSize: 14,
+    fontWeight: '800',
+    marginBottom: 10,
+  },
+  connectInput: {
+    backgroundColor: '#FFFFFF',
+    borderColor: '#DCDCDC',
+    borderRadius: 10,
+    borderWidth: 1,
+    color: '#111111',
+    fontSize: 16,
+    height: 54,
+    marginBottom: 12,
+    paddingHorizontal: 14,
   },
   outlineButton: {
     alignItems: 'center',
