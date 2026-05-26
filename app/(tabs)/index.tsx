@@ -1441,7 +1441,7 @@ function DropDetailModal({
 
 function DetailPhoto({ image, label, locked, side }: { image?: string; label: string; locked: boolean; side: 'left' | 'right' }) {
   return (
-    <View style={[styles.detailPhoto, !image && styles.emptyPhotoSlot, sideRadius(side)]}>
+    <View style={[styles.detailPhoto, !image && styles.emptyPhotoSlot, !image && styles.detailEmptyPhotoSlot, sideRadius(side)]}>
       {image ? <SafeImage blurRadius={locked ? 16 : 0} image={image} label={`detail-${label}`} resizeMode="cover" /> : <View style={styles.detailPlaceholder} />}
       {locked ? (
         <>
@@ -3908,6 +3908,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#F5F5F5',
     height: '100%',
     width: '100%',
+  },
+  detailEmptyPhotoSlot: {
+    borderColor: '#D8D8D8',
   },
   profileSheet: {
     backgroundColor: '#FEFDFB',
