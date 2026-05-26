@@ -1260,7 +1260,6 @@ function RecentThumb({ height = RECENT_THUMB_DEFAULT_HEIGHT, image, locked, side
       {image ? <SafeImage blurRadius={locked ? 12 : 0} image={image} label={`recent-${side}`} /> : <View style={styles.recentPlaceholder} />}
       {locked ? (
         <>
-          <MosaicOverlay />
           <View style={styles.recentLock}>
             <Feather name="lock" size={18} color="#FFFFFF" />
           </View>
