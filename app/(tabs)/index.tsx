@@ -727,11 +727,13 @@ function DaydropCameraModal({
                   flash={flash}
                   mirror={false}
                   mode="picture"
+                  selectedLens={facing === 'back' ? 'builtInWideAngleCamera' : undefined}
                   onCameraReady={() => {
                     console.log('[DaydropCamera] ready', { facing });
                     setCameraReady(true);
                   }}
                   style={[styles.cameraPreview, facing === 'front' && styles.cameraPreviewMirrored]}
+                  zoom={0}
                 />
               )}
             </View>
