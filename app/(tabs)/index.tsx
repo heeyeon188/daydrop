@@ -9,12 +9,14 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as ExpoLinking from 'expo-linking';
 import * as MediaLibrary from 'expo-media-library';
 import * as Notifications from 'expo-notifications';
+import * as Sharing from 'expo-sharing';
 import React from 'react';
 import {
   ActivityIndicator,
   Alert,
   Image,
   KeyboardAvoidingView,
+  LayoutChangeEvent,
   Linking,
   Modal,
   PixelRatio,
@@ -61,6 +63,10 @@ const PERMISSION_INTRO_STORAGE_KEY = 'daydrop.hasSeenPermissionIntro';
 const PENDING_INVITE_CODE_STORAGE_KEY = 'daydrop.pendingInviteCode';
 const DEFAULT_PHOTO_PAIR_HEIGHT = 292;
 const SHARE_IMAGE_MAX_HEIGHT = 1600;
+const STORY_TEMPLATE_BASE_WIDTH = 360;
+const STORY_TEMPLATE_BASE_HEIGHT = 640;
+const STORY_TEMPLATE_PHOTO_WIDTH = 344;
+const STORY_TEMPLATE_PHOTO_HEIGHT = 316;
 const RECENT_THUMB_GROUP_WIDTH = 138;
 const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
 const RECENT_THUMB_DEFAULT_HEIGHT = 82;
@@ -77,6 +83,14 @@ type FullImage = { canDelete?: boolean; image?: string; label: string; mission: 
 type DropDetail = { drop: RecentDrop; state: DropState };
 type ImageSize = { height: number; width: number };
 type SharePhotoPair = { leftUri: string; rightUri: string };
+type ShareStoryData = SharePhotoPair & {
+  date: string;
+  leftLocation: string;
+  leftName: string;
+  mission: string;
+  rightLocation: string;
+  rightName: string;
+};
 type ShareCanvasLayout = {
   height: number;
   key: number;
@@ -84,6 +98,15 @@ type ShareCanvasLayout = {
   leftUri: string;
   right: ImageSize;
   rightUri: string;
+  width: number;
+};
+type ShareStoryLayout = ShareStoryData & {
+  height: number;
+  key: number;
+  leftPhoto: ImageSize;
+  photoHeight: number;
+  photoWidth: number;
+  rightPhoto: ImageSize;
   width: number;
 };
 type SafeImageResizeMode = React.ComponentProps<typeof Image>['resizeMode'];
@@ -267,10 +290,16 @@ function MissionContent({
     }
 
     return {
+      date: formatDate(today.daily_drop.drop_date, language),
+      leftLocation: formatLocation(members.partner, language, t.cityFallbackPartner),
+      leftName: displayMemberName(members.partner, t.partner),
       leftUri: partner.image_url,
+      mission: getMissionPrompt(today.mission, language),
+      rightLocation: formatLocation(members.me, language, t.cityFallbackMe),
+      rightName: displayMemberName(members.me, t.me),
       rightUri: mine.image_url,
     };
-  }, [myUserId, state, today]);
+  }, [language, members.me, members.partner, myUserId, state, t.cityFallbackMe, t.cityFallbackPartner, t.me, t.partner, today]);
   const hasPartner = Boolean(today?.couple.status === 'active' && members.partner);
   const isTodayUnlocked = hasPartner && state === 'both';
   const mainButtonDisabled = hasPartner ? (state === 'meOnly' || uploading || deletingPhoto) : uploading || deletingPhoto;
@@ -592,7 +621,7 @@ function MissionContent({
         t={t}
         onClose={() => setDropDetail(null)}
       />
-      <TodayShareSheet language={language} photoPair={sharePhotoPair} t={t} visible={shareSheetVisible} onClose={() => setShareSheetVisible(false)} />
+      <TodayShareSheet language={language} shareData={sharePhotoPair} t={t} visible={shareSheetVisible} onClose={() => setShareSheetVisible(false)} />
       <SettingsSheet
         language={language}
         profile={profile}
@@ -1584,28 +1613,41 @@ function DropDetailModal({
 function TodayShareSheet({
   language,
   onClose,
-  photoPair,
+  shareData,
   t,
   visible,
 }: {
   language: Language;
   onClose: () => void;
-  photoPair: SharePhotoPair | null;
+  shareData: ShareStoryData | null;
   t: Copy;
   visible: boolean;
 }) {
   const insets = useSafeAreaInsets();
   const captureViewRef = React.useRef<View>(null);
+  const storyCaptureViewRef = React.useRef<View>(null);
   const imageLoadCountRef = React.useRef(0);
   const imageLoadRejectRef = React.useRef<((error: Error) => void) | null>(null);
   const imageLoadResolveRef = React.useRef<(() => void) | null>(null);
+  const storyImageLoadCountRef = React.useRef(0);
+  const storyReadyRejectRef = React.useRef<((error: Error) => void) | null>(null);
+  const storyReadyResolveRef = React.useRef<(() => void) | null>(null);
+  const storyTemplateLaidOutRef = React.useRef(false);
   const [canvasLayout, setCanvasLayout] = React.useState<ShareCanvasLayout | null>(null);
+  const [storyLayout, setStoryLayout] = React.useState<ShareStoryLayout | null>(null);
   const [saving, setSaving] = React.useState(false);
+  const [sharingStory, setSharingStory] = React.useState(false);
 
   React.useEffect(() => {
     if (!visible) {
       setCanvasLayout(null);
+      setStoryLayout(null);
+      storyImageLoadCountRef.current = 0;
+      storyReadyRejectRef.current = null;
+      storyReadyResolveRef.current = null;
+      storyTemplateLaidOutRef.current = false;
       setSaving(false);
+      setSharingStory(false);
     }
   }, [visible]);
 
@@ -1624,12 +1666,39 @@ function TodayShareSheet({
     imageLoadRejectRef.current = null;
   };
 
+  const resolveStoryTemplateIfReady = () => {
+    if (storyTemplateLaidOutRef.current && storyImageLoadCountRef.current >= 2) {
+      storyReadyResolveRef.current?.();
+      storyReadyResolveRef.current = null;
+      storyReadyRejectRef.current = null;
+    }
+  };
+
+  const handleStoryTemplateLayout = (event: LayoutChangeEvent) => {
+    const { height, width } = event.nativeEvent.layout;
+    console.log('[share] story template onLayout width/height', { height, width });
+    storyTemplateLaidOutRef.current = width > 0 && height > 0;
+    resolveStoryTemplateIfReady();
+  };
+
+  const handleStoryImageLoad = (side: 'left' | 'right') => {
+    storyImageLoadCountRef.current += 1;
+    console.log(side === 'left' ? '[share] left image loaded' : '[share] right image loaded');
+    resolveStoryTemplateIfReady();
+  };
+
+  const handleStoryImageError = () => {
+    storyReadyRejectRef.current?.(new Error('photo_read_failed'));
+    storyReadyResolveRef.current = null;
+    storyReadyRejectRef.current = null;
+  };
+
   const handleSavePhoto = async () => {
     if (saving) {
       return;
     }
 
-    if (!photoPair) {
+    if (!shareData) {
       Alert.alert(t.savePhoto, t.photoReadError);
       return;
     }
@@ -1647,8 +1716,8 @@ function TodayShareSheet({
         return;
       }
 
-      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(photoPair.leftUri), getRemoteImageSize(photoPair.rightUri)]);
-      const nextLayout = createShareCanvasLayout(photoPair, leftSize, rightSize);
+      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(shareData.leftUri), getRemoteImageSize(shareData.rightUri)]);
+      const nextLayout = createShareCanvasLayout(shareData, leftSize, rightSize);
       const imageLoadPromise = new Promise<void>((resolve, reject) => {
         imageLoadCountRef.current = 0;
         imageLoadResolveRef.current = resolve;
@@ -1684,6 +1753,73 @@ function TodayShareSheet({
     }
   };
 
+  const handleShareInstagramStory = async () => {
+    if (sharingStory) {
+      return;
+    }
+
+    if (!shareData) {
+      Alert.alert(t.share, t.photoReadError);
+      return;
+    }
+
+    try {
+      setSharingStory(true);
+      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(shareData.leftUri), getRemoteImageSize(shareData.rightUri)]);
+      const nextLayout = createShareStoryLayout(shareData, leftSize, rightSize, language);
+      let templateReadyTimeout: ReturnType<typeof setTimeout> | null = null;
+      const templateReadyPromise = new Promise<void>((resolve, reject) => {
+        storyImageLoadCountRef.current = 0;
+        storyReadyResolveRef.current = () => {
+          if (templateReadyTimeout) {
+            clearTimeout(templateReadyTimeout);
+            templateReadyTimeout = null;
+          }
+          resolve();
+        };
+        storyReadyRejectRef.current = reject;
+        storyTemplateLaidOutRef.current = false;
+        templateReadyTimeout = setTimeout(() => reject(new Error('story_template_not_ready')), 8000);
+      });
+
+      setStoryLayout(nextLayout);
+      await templateReadyPromise;
+      await waitForNextFrame();
+
+      if (!storyCaptureViewRef.current) {
+        throw new Error('capture_view_missing');
+      }
+
+      console.log('[share] story template capture start', {
+        height: nextLayout.height,
+        photoHeight: nextLayout.photoHeight,
+        photoWidth: nextLayout.photoWidth,
+        width: nextLayout.width,
+      });
+      const storyUri = await captureRef(storyCaptureViewRef, {
+        format: 'png',
+        height: nextLayout.height,
+        quality: 1,
+        result: 'tmpfile',
+        width: nextLayout.width,
+      });
+      console.log('[share] captured uri', storyUri);
+
+      const shareUri = await prepareCapturedStoryFile(storyUri);
+      console.log('[share] Instagram direct share attempt');
+      console.warn('[share] Instagram direct share fail', 'Expo Linking.openURL cannot attach a generated image as an Instagram Story background asset.');
+
+      await shareStoryFileFallback(shareUri, language);
+      setStoryLayout(null);
+      onClose();
+    } catch (nextError) {
+      console.error('share instagram story failed', nextError);
+      Alert.alert(t.share, nextError instanceof Error && nextError.message === 'photo_read_failed' ? t.photoReadError : t.unknownError);
+    } finally {
+      setSharingStory(false);
+    }
+  };
+
   return (
     <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
       <Pressable style={styles.sheetBackdrop} onPress={onClose}>
@@ -1696,9 +1832,9 @@ function TodayShareSheet({
             {t.shareDropBody}
           </Text>
           <View style={styles.shareOptions}>
-            <Pressable style={styles.shareOption}>
+            <Pressable disabled={sharingStory} onPress={handleShareInstagramStory} style={[styles.shareOption, sharingStory && styles.shareOptionDisabled]}>
               <View style={styles.shareOptionIcon}>
-                <Feather name="instagram" size={21} color="#111111" />
+                {sharingStory ? <ActivityIndicator color="#111111" /> : <Feather name="instagram" size={21} color="#111111" />}
               </View>
               <Text allowFontScaling={false} numberOfLines={1} style={styles.shareOptionText}>
                 {t.shareToInstagramStory}
@@ -1746,6 +1882,97 @@ function TodayShareSheet({
                   width: canvasLayout.right.width / PixelRatio.get(),
                 }}
               />
+            </View>
+          ) : null}
+          {storyLayout ? (
+            <View
+              collapsable={false}
+              onLayout={handleStoryTemplateLayout}
+              ref={storyCaptureViewRef}
+              style={[
+                styles.storyCaptureCanvas,
+                {
+                  height: storyLayout.height,
+                  width: storyLayout.width,
+                },
+              ]}>
+              <View style={styles.storyTopBar}>
+                <View style={styles.storyProgressTrack}>
+                  <View style={styles.storyProgressFill} />
+                </View>
+                <View style={styles.storyHeaderRow}>
+                  <View style={styles.storyAvatarOuter}>
+                    <View style={styles.storyAvatarInner}>
+                      <View style={styles.storyAvatarHead} />
+                      <View style={styles.storyAvatarBody} />
+                    </View>
+                  </View>
+                  <Text allowFontScaling={false} style={styles.storyHeaderBrand}>
+                    DAYDROP
+                  </Text>
+                  <Text allowFontScaling={false} style={styles.storyHeaderTime}>
+                    {language === 'ko' ? '2시간' : '2h'}
+                  </Text>
+                  <Feather name="x" size={30} color="#FFFFFF" strokeWidth={2.35} style={styles.storyHeaderClose} />
+                </View>
+              </View>
+              <Text allowFontScaling={false} style={styles.storyEyebrow}>
+                {"Today's Drop"}
+              </Text>
+              <Text allowFontScaling={false} style={styles.storyMission}>
+                {storyLayout.mission}
+              </Text>
+              <View style={[styles.storyPhotoRow, { height: storyLayout.photoHeight, width: storyLayout.photoWidth }]}>
+                <Image
+                  key={`story-left-${storyLayout.key}`}
+                  onError={handleStoryImageError}
+                  onLoad={() => handleStoryImageLoad('left')}
+                  resizeMode="cover"
+                  source={{ uri: storyLayout.leftUri }}
+                  style={{
+                    height: storyLayout.leftPhoto.height,
+                    width: storyLayout.leftPhoto.width,
+                  }}
+                />
+                <Image
+                  key={`story-right-${storyLayout.key}`}
+                  onError={handleStoryImageError}
+                  onLoad={() => handleStoryImageLoad('right')}
+                  resizeMode="cover"
+                  source={{ uri: storyLayout.rightUri }}
+                  style={{
+                    height: storyLayout.rightPhoto.height,
+                    width: storyLayout.rightPhoto.width,
+                  }}
+                />
+              </View>
+              <View style={[styles.storyNameRow, { width: storyLayout.photoWidth }]}>
+                <View style={styles.storyPersonBlock}>
+                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.68} numberOfLines={1} style={styles.storyName}>
+                    {storyLayout.leftName}
+                  </Text>
+                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.7} numberOfLines={1} style={styles.storyLocation}>
+                    {storyLayout.leftLocation}
+                  </Text>
+                </View>
+                <Text allowFontScaling={false} style={styles.storyOrnament}>
+                  {'< - - -  ✦  - - - >'}
+                </Text>
+                <View style={styles.storyPersonBlock}>
+                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.68} numberOfLines={1} style={styles.storyName}>
+                    {storyLayout.rightName}
+                  </Text>
+                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.7} numberOfLines={1} style={styles.storyLocation}>
+                    {storyLayout.rightLocation}
+                  </Text>
+                </View>
+              </View>
+              <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.72} numberOfLines={1} style={styles.storyDate}>
+                {storyLayout.date}
+              </Text>
+              <Text allowFontScaling={false} style={styles.storyBrand}>
+                DAYDROP
+              </Text>
             </View>
           ) : null}
         </Pressable>
@@ -2567,6 +2794,141 @@ function createShareCanvasLayout(pair: SharePhotoPair, leftSize: ImageSize, righ
     rightUri: pair.rightUri,
     width: leftWidth + rightWidth,
   };
+}
+
+function createShareStoryLayout(data: ShareStoryData, leftSize: ImageSize, rightSize: ImageSize, language: Language): ShareStoryLayout {
+  void leftSize;
+  void rightSize;
+  const photoHeight = STORY_TEMPLATE_PHOTO_HEIGHT;
+  const leftWidth = STORY_TEMPLATE_PHOTO_WIDTH / 2;
+  const rightWidth = STORY_TEMPLATE_PHOTO_WIDTH / 2;
+  const photoWidth = leftWidth + rightWidth;
+
+  return {
+    ...data,
+    height: STORY_TEMPLATE_BASE_HEIGHT,
+    key: Date.now(),
+    leftPhoto: {
+      height: photoHeight,
+      width: leftWidth,
+    },
+    mission: formatStoryMission(data.mission, language),
+    photoHeight,
+    photoWidth,
+    rightPhoto: {
+      height: photoHeight,
+      width: rightWidth,
+    },
+    width: STORY_TEMPLATE_BASE_WIDTH,
+  };
+}
+
+function formatStoryMission(value: string, language: Language) {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.includes('\n')) {
+    return normalized;
+  }
+
+  if (language === 'ko') {
+    return splitBalancedKoreanMission(normalized);
+  }
+
+  return splitBalancedWordMission(normalized);
+}
+
+function splitBalancedKoreanMission(value: string) {
+  const weightedLength = Array.from(value).reduce((total, char) => total + (/[ -~]/.test(char) ? 0.55 : 1), 0);
+  if (weightedLength <= 11) {
+    return value;
+  }
+
+  const chars = Array.from(value);
+  const target = weightedLength / 2;
+  let bestIndex = Math.ceil(chars.length / 2);
+  let bestScore = Number.POSITIVE_INFINITY;
+  let leftWeight = 0;
+
+  chars.forEach((char, index) => {
+    leftWeight += /[ -~]/.test(char) ? 0.55 : 1;
+    if (index < 3 || index > chars.length - 5) {
+      return;
+    }
+
+    const nextChar = chars[index + 1];
+    const boundaryBonus = char === ' ' || nextChar === ' ' ? -1.6 : 0;
+    const score = Math.abs(leftWeight - target) + boundaryBonus;
+    if (score < bestScore) {
+      bestScore = score;
+      bestIndex = index + 1;
+    }
+  });
+
+  return `${chars.slice(0, bestIndex).join('').trim()}\n${chars.slice(bestIndex).join('').trim()}`;
+}
+
+function splitBalancedWordMission(value: string) {
+  const words = value.split(' ');
+  if (words.length < 4 || value.length <= 24) {
+    return value;
+  }
+
+  const target = value.length / 2;
+  let bestIndex = Math.ceil(words.length / 2);
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (let index = 1; index < words.length; index += 1) {
+    const left = words.slice(0, index).join(' ');
+    const score = Math.abs(left.length - target);
+    if (score < bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+
+  return `${words.slice(0, bestIndex).join(' ')}\n${words.slice(bestIndex).join(' ')}`;
+}
+
+async function prepareCapturedStoryFile(uri: string) {
+  const capturedInfo = await FileSystem.getInfoAsync(uri);
+  console.log('[share] captured file exists', capturedInfo.exists);
+  console.log('[share] captured file size', capturedInfo.exists ? capturedInfo.size ?? 0 : 0);
+
+  if (!capturedInfo.exists || !capturedInfo.size || capturedInfo.size <= 0) {
+    throw new Error('capture_file_empty');
+  }
+
+  if (!FileSystem.cacheDirectory) {
+    return uri;
+  }
+
+  const shareUri = `${FileSystem.cacheDirectory}daydrop-story-${Date.now()}.png`;
+  await FileSystem.copyAsync({ from: uri, to: shareUri });
+  const shareInfo = await FileSystem.getInfoAsync(shareUri);
+  console.log('[share] captured file exists', shareInfo.exists);
+  console.log('[share] captured file size', shareInfo.exists ? shareInfo.size ?? 0 : 0);
+
+  if (!shareInfo.exists || !shareInfo.size || shareInfo.size <= 0) {
+    throw new Error('capture_file_empty');
+  }
+
+  return shareUri;
+}
+
+async function shareStoryFileFallback(uri: string, language: Language) {
+  console.log('[share] fallback share attempt', { uri });
+  const isAvailable = await Sharing.isAvailableAsync();
+  if (isAvailable) {
+    await Sharing.shareAsync(uri, {
+      dialogTitle: language === 'ko' ? 'Instagram Story로 공유' : 'Share to Instagram Story',
+      mimeType: 'image/png',
+      UTI: 'public.png',
+    });
+    return;
+  }
+
+  await Share.share({
+    message: language === 'ko' ? 'Daydrop 스토리 이미지' : 'Daydrop story image',
+    url: uri,
+  });
 }
 
 function waitForNextFrame() {
@@ -4403,6 +4765,173 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     position: 'absolute',
     top: -10000,
+  },
+  storyCaptureCanvas: {
+    alignItems: 'center',
+    backgroundColor: '#F5EFE6',
+    justifyContent: 'flex-start',
+    left: -10000,
+    overflow: 'hidden',
+    position: 'absolute',
+    top: -10000,
+  },
+  storyTopBar: {
+    height: 80,
+    width: STORY_TEMPLATE_BASE_WIDTH,
+  },
+  storyProgressTrack: {
+    backgroundColor: 'rgba(255, 255, 255, 0.56)',
+    borderRadius: 2,
+    height: 2,
+    left: 12,
+    overflow: 'hidden',
+    position: 'absolute',
+    top: 10,
+    width: STORY_TEMPLATE_BASE_WIDTH - 24,
+  },
+  storyProgressFill: {
+    backgroundColor: '#FFFFFF',
+    height: 2,
+    width: '44%',
+  },
+  storyHeaderRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    height: 40,
+    left: 11,
+    position: 'absolute',
+    top: 23,
+    width: STORY_TEMPLATE_BASE_WIDTH - 22,
+  },
+  storyAvatarOuter: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.86)',
+    borderRadius: 18,
+    height: 36,
+    justifyContent: 'center',
+    marginRight: 8,
+    width: 36,
+  },
+  storyAvatarInner: {
+    alignItems: 'center',
+    backgroundColor: '#E3E3E3',
+    borderColor: '#FFFFFF',
+    borderRadius: 15,
+    borderWidth: 1,
+    height: 30,
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+    width: 30,
+  },
+  storyAvatarHead: {
+    backgroundColor: '#9F9F9F',
+    borderRadius: 8,
+    height: 15,
+    marginBottom: -1,
+    width: 15,
+  },
+  storyAvatarBody: {
+    backgroundColor: '#9F9F9F',
+    borderRadius: 14,
+    height: 15,
+    marginBottom: -5,
+    width: 28,
+  },
+  storyHeaderBrand: {
+    color: '#050505',
+    fontSize: 14,
+    fontWeight: '900',
+    lineHeight: 18,
+    marginRight: 14,
+  },
+  storyHeaderTime: {
+    color: '#9C9790',
+    fontSize: 13,
+    fontWeight: '800',
+    lineHeight: 18,
+  },
+  storyHeaderClose: {
+    marginLeft: 'auto',
+  },
+  storyEyebrow: {
+    color: '#979189',
+    fontSize: 13,
+    fontWeight: '800',
+    lineHeight: 16,
+    marginBottom: 12,
+    marginTop: 2,
+    textAlign: 'center',
+  },
+  storyMission: {
+    color: '#050505',
+    fontSize: 25,
+    fontWeight: '900',
+    lineHeight: 31,
+    marginBottom: 14,
+    textAlign: 'center',
+    width: 300,
+  },
+  storyPhotoRow: {
+    alignItems: 'center',
+    borderRadius: 8,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginBottom: 14,
+    overflow: 'hidden',
+  },
+  storyNameRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 17,
+  },
+  storyPersonBlock: {
+    alignItems: 'center',
+    width: 94,
+  },
+  storyName: {
+    color: '#111111',
+    fontSize: 13,
+    fontWeight: '900',
+    lineHeight: 18,
+    textAlign: 'center',
+    width: '100%',
+  },
+  storyLocation: {
+    color: '#928E87',
+    fontSize: 12,
+    fontWeight: '800',
+    lineHeight: 16,
+    marginTop: 3,
+    textAlign: 'center',
+    width: '100%',
+  },
+  storyOrnament: {
+    color: '#AAA59E',
+    flex: 1,
+    fontSize: 17,
+    fontWeight: '500',
+    lineHeight: 20,
+    marginTop: 3,
+    textAlign: 'center',
+  },
+  storyDate: {
+    color: '#8F8A83',
+    fontSize: 15,
+    fontWeight: '800',
+    lineHeight: 20,
+    marginBottom: 19,
+    textAlign: 'center',
+    width: STORY_TEMPLATE_PHOTO_WIDTH,
+  },
+  storyBrand: {
+    color: '#050505',
+    fontSize: 18,
+    fontWeight: '900',
+    letterSpacing: 8,
+    lineHeight: 24,
+    paddingLeft: 8,
+    textAlign: 'center',
   },
   detailHeader: {
     alignItems: 'flex-start',
