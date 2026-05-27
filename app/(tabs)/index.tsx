@@ -74,6 +74,39 @@ type DropDetail = { drop: RecentDrop; state: DropState };
 type ImageSize = { height: number; width: number };
 type SafeImageResizeMode = React.ComponentProps<typeof Image>['resizeMode'];
 
+const ULTRA_WIDE_BACK_LENS_PATTERNS = ['ultra', '0.5', '초광각'];
+const NON_DEFAULT_BACK_LENS_PATTERNS = [
+  'tele',
+  'dual',
+  'triple',
+  'lidar',
+  'depth',
+  'true',
+  'desk',
+  'continuity',
+  '망원',
+  '듀얼',
+  '트리플',
+  '심도',
+];
+const DEFAULT_BACK_LENS_PATTERNS = ['wide angle', 'wide-angle', 'wide', 'back camera', 'camera', '광각', '후면', '카메라'];
+
+function selectDefaultBackLens(lenses: string[]) {
+  const nonUltraWideBackLenses = lenses.filter((lens) => {
+    const normalized = lens.toLowerCase();
+    return !ULTRA_WIDE_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern));
+  });
+  const preferredBackLenses = nonUltraWideBackLenses.filter((lens) => {
+    const normalized = lens.toLowerCase();
+    return !NON_DEFAULT_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern));
+  });
+
+  return preferredBackLenses.find((lens) => {
+    const normalized = lens.toLowerCase();
+    return DEFAULT_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern));
+  }) ?? preferredBackLenses[0] ?? nonUltraWideBackLenses[0];
+}
+
 export default function MissionScreen() {
   const { user, loading: sessionLoading, configError } = useSession();
   const profileState = useProfile(user?.id);
@@ -202,7 +235,6 @@ function MissionContent({
   const [dropDetail, setDropDetail] = React.useState<DropDetail | null>(null);
   const [partnerMenuVisible, setPartnerMenuVisible] = React.useState(false);
   const [permissionIntroVisible, setPermissionIntroVisible] = React.useState(false);
-  const [photoPairWidth, setPhotoPairWidth] = React.useState(0);
   const [settingsVisible, setSettingsVisible] = React.useState(false);
   const [storedPendingInviteCode, setStoredPendingInviteCode] = React.useState<string | null>(null);
   const activePendingInviteCode = pendingInviteCode ?? storedPendingInviteCode;
@@ -431,11 +463,7 @@ function MissionContent({
               <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.missionMeta}>
                 {meta}
               </Text>
-              <View
-                style={styles.photoPair}
-                onLayout={(event) => {
-                  setPhotoPairWidth(event.nativeEvent.layout.width);
-                }}>
+              <View style={styles.photoPair}>
                 <TodayDropPair
                   language={language}
                   members={members}
@@ -448,7 +476,6 @@ function MissionContent({
                   state={state}
                   t={t}
                   today={today}
-                  width={photoPairWidth}
                 />
               </View>
             </View>
@@ -624,9 +651,11 @@ function DaydropCameraModal({
   const [captured, setCaptured] = React.useState<(DaydropPhotoAsset & { didFlip?: boolean; mirrorMode?: string; source: CameraFacing }) | null>(null);
   const [cameraReady, setCameraReady] = React.useState(false);
   const [capturing, setCapturing] = React.useState(false);
+  const [defaultBackLens, setDefaultBackLens] = React.useState<string | undefined>(undefined);
   const cameraRef = React.useRef<CameraView>(null);
   const hasPermission = permission?.granted === true;
   const shutterDisabled = !hasPermission || !cameraReady || capturing || submitting;
+  const selectedLens = Platform.OS === 'ios' && facing === 'back' ? defaultBackLens : undefined;
 
   React.useEffect(() => {
     if (!visible) {
@@ -652,6 +681,13 @@ function DaydropCameraModal({
       shutterDisabled,
     });
   }, [cameraReady, captured, capturing, facing, hasPermission, shutterDisabled, visible]);
+
+  const updateDefaultBackLens = React.useCallback((lenses: string[]) => {
+    const nextLens = selectDefaultBackLens(lenses);
+    if (nextLens) {
+      setDefaultBackLens((current) => (current === nextLens ? current : nextLens));
+    }
+  }, []);
 
   const capturePhoto = async () => {
     const camera = cameraRef.current;
@@ -810,13 +846,20 @@ function DaydropCameraModal({
                   flash={flash}
                   mirror={false}
                   mode="picture"
-                  selectedLens={facing === 'back' ? 'builtInWideAngleCamera' : undefined}
+                  selectedLens={selectedLens}
+                  onAvailableLensesChanged={({ lenses }) => {
+                    if (facing === 'back') {
+                      updateDefaultBackLens(lenses);
+                    }
+                  }}
                   onCameraReady={() => {
                     console.log('[DaydropCamera] ready', { facing });
                     setCameraReady(true);
+                    if (facing === 'back') {
+                      void cameraRef.current?.getAvailableLensesAsync().then(updateDefaultBackLens).catch(() => undefined);
+                    }
                   }}
                   style={[styles.cameraPreview, facing === 'front' && styles.cameraPreviewMirrored]}
-                  zoom={0}
                 />
               )}
             </View>
@@ -968,7 +1011,6 @@ function TodayDropPair({
   state,
   t,
   today,
-  width,
 }: {
   deletingPhoto: boolean;
   hasPartner: boolean;
@@ -981,15 +1023,9 @@ function TodayDropPair({
   state: DropState;
   t: Copy;
   today: TodayDropPayload;
-  width: number;
 }) {
   const submissions = React.useMemo(() => splitSubmissions(today.submissions, myUserId), [myUserId, today.submissions]);
   const { mine, partner } = submissions;
-  const mineSize = useImageSize(mine?.image_url);
-  const partnerSize = useImageSize(partner?.image_url);
-  const slotWidth = width > 0 ? width / 2 : 0;
-  const mineHeight = calculateImageHeight(slotWidth, mineSize, DEFAULT_PHOTO_PAIR_HEIGHT);
-  const partnerHeight = calculateImageHeight(slotWidth, partnerSize, DEFAULT_PHOTO_PAIR_HEIGHT);
   const myLabel = displayMemberName(members.me, t.me);
   const partnerLabel = displayMemberName(members.partner, t.partner);
   const mission = getMissionPrompt(today.mission, language);
@@ -997,18 +1033,17 @@ function TodayDropPair({
   if (!hasPartner) {
     return (
       <>
-        <PrePartnerSlot height={mine ? mineHeight : DEFAULT_PHOTO_PAIR_HEIGHT} t={t} />
+        <PrePartnerSlot t={t} />
         {mine ? (
           <EditablePhotoSlot
             deleting={deletingPhoto}
-            height={mineHeight}
             image={mine.image_url}
             label={myLabel}
             onOpenImage={() => onOpenImage({ canDelete: true, image: mine.image_url, label: myLabel, mission })}
             side="right"
           />
         ) : (
-          <SendSlot height={DEFAULT_PHOTO_PAIR_HEIGHT} label={myLabel} message={getSoloSendMessage(today.mission, language)} onPress={onUploadPress} t={t} />
+          <SendSlot label={myLabel} message={getSoloSendMessage(today.mission, language)} onPress={onUploadPress} t={t} />
         )}
       </>
     );
@@ -1018,7 +1053,6 @@ function TodayDropPair({
     return (
       <>
         <PhotoSlot
-          height={partnerHeight}
           image={partner?.image_url}
           label={partnerLabel}
           side="left"
@@ -1026,7 +1060,6 @@ function TodayDropPair({
         />
         <EditablePhotoSlot
           deleting={deletingPhoto}
-          height={mineHeight}
           image={mine?.image_url}
           label={myLabel}
           onOpenImage={() => onOpenImage({ canDelete: true, image: mine?.image_url, label: myLabel, mission })}
@@ -1039,10 +1072,9 @@ function TodayDropPair({
   if (state === 'meOnly') {
     return (
       <>
-        <WaitingSlot height={mine ? mineHeight : DEFAULT_PHOTO_PAIR_HEIGHT} label={partnerLabel} t={t} />
+        <WaitingSlot label={partnerLabel} t={t} />
         <EditablePhotoSlot
           deleting={deletingPhoto}
-          height={mineHeight}
           image={mine?.image_url}
           label={myLabel}
           onOpenImage={() => onOpenImage({ canDelete: true, image: mine?.image_url, label: myLabel, mission })}
@@ -1055,8 +1087,8 @@ function TodayDropPair({
   if (state === 'partnerOnly') {
     return (
       <>
-        <LockedPhotoSlot height={partnerHeight} image={partner?.image_url} label={partnerLabel} onPress={onLockedPartnerPress} t={t} />
-        <SendSlot height={partner ? partnerHeight : DEFAULT_PHOTO_PAIR_HEIGHT} label={myLabel} onPress={onUploadPress} t={t} />
+        <LockedPhotoSlot image={partner?.image_url} label={partnerLabel} onPress={onLockedPartnerPress} t={t} />
+        <SendSlot label={myLabel} onPress={onUploadPress} t={t} />
       </>
     );
   }
@@ -1115,9 +1147,9 @@ function getStateCopy(state: DropState, t: Copy, hasPartner: boolean) {
   }
 }
 
-function PrePartnerSlot({ height, t }: { height: number; t: Copy }) {
+function PrePartnerSlot({ t }: { t: Copy }) {
   return (
-    <View style={[styles.dropSlot, styles.prePartnerSlot, sideRadius('left'), { height }]}>
+    <View style={[styles.dropSlot, styles.prePartnerSlot, sideRadius('left')]}>
       <Feather name="users" size={46} color="#8B8B8B" strokeWidth={1.45} />
       <Text allowFontScaling={false} style={styles.prePartnerTitle}>
         {t.beforePartner}
@@ -1130,7 +1162,6 @@ function PrePartnerSlot({ height, t }: { height: number; t: Copy }) {
 }
 
 function EmptySlot({
-  height = DEFAULT_PHOTO_PAIR_HEIGHT,
   icon,
   label,
   message,
@@ -1138,7 +1169,6 @@ function EmptySlot({
   side,
   tone,
 }: {
-  height?: number;
   icon: keyof typeof Feather.glyphMap;
   label: string;
   message: string;
@@ -1150,7 +1180,7 @@ function EmptySlot({
   const toneColor = tone === 'blue' ? '#7890AE' : '#9B8D77';
 
   return (
-    <Pressable disabled={!onPress} onPress={onPress} style={[styles.dropSlot, toneStyle, styles.emptyPhotoSlot, sideRadius(side), { height }]}>
+    <Pressable disabled={!onPress} onPress={onPress} style={[styles.dropSlot, toneStyle, styles.emptyPhotoSlot, sideRadius(side)]}>
       <Feather name={icon} size={24} color={toneColor} strokeWidth={1.6} />
       <Text allowFontScaling={false} style={styles.emptyMessage}>
         {message}
@@ -1162,9 +1192,9 @@ function EmptySlot({
   );
 }
 
-function WaitingSlot({ height, label, t }: { height: number; label: string; t: Copy }) {
+function WaitingSlot({ label, t }: { label: string; t: Copy }) {
   return (
-    <View style={[styles.dropSlot, styles.waitingSlot, styles.emptyPhotoSlot, sideRadius('left'), { height }]}>
+    <View style={[styles.dropSlot, styles.waitingSlot, styles.emptyPhotoSlot, sideRadius('left')]}>
       <View style={styles.waitingContent}>
         <Feather name="refresh-cw" size={31} color="#858585" strokeWidth={1.65} />
         <Text allowFontScaling={false} style={styles.waitingText}>
@@ -1178,10 +1208,10 @@ function WaitingSlot({ height, label, t }: { height: number; label: string; t: C
   );
 }
 
-function PhotoSlot({ height, image, label, onPress, side }: { height: number; image?: string; label: string; onPress: () => void; side: 'left' | 'right' }) {
+function PhotoSlot({ image, label, onPress, side }: { image?: string; label: string; onPress: () => void; side: 'left' | 'right' }) {
   return (
-    <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius(side), { height }]}>
-      <SafeImage image={image} label={label} />
+    <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius(side)]}>
+      <SafeImage image={image} label={label} resizeMode="cover" />
       <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.photoLabel}>
         {label}
       </Text>
@@ -1191,22 +1221,20 @@ function PhotoSlot({ height, image, label, onPress, side }: { height: number; im
 
 function EditablePhotoSlot({
   deleting,
-  height,
   image,
   label,
   onOpenImage,
   side,
 }: {
   deleting: boolean;
-  height: number;
   image?: string;
   label: string;
   onOpenImage: () => void;
   side: 'left' | 'right';
 }) {
   return (
-    <Pressable disabled={deleting} onPress={onOpenImage} style={[styles.dropSlot, styles.imageSlot, sideRadius(side), { height }]}>
-      <SafeImage image={image} label={label} />
+    <Pressable disabled={deleting} onPress={onOpenImage} style={[styles.dropSlot, styles.imageSlot, sideRadius(side)]}>
+      <SafeImage image={image} label={label} resizeMode="cover" />
       <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={1} style={styles.photoLabel}>
         {label}
       </Text>
@@ -1214,10 +1242,10 @@ function EditablePhotoSlot({
   );
 }
 
-function LockedPhotoSlot({ height, image, label, onPress, t }: { height: number; image?: string; label: string; onPress: () => void; t: Copy }) {
+function LockedPhotoSlot({ image, label, onPress, t }: { image?: string; label: string; onPress: () => void; t: Copy }) {
   return (
-    <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius('left'), { height }]}>
-      <SafeImage blurRadius={24} image={image} label={label} />
+    <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius('left')]}>
+      <SafeImage blurRadius={24} image={image} label={label} resizeMode="cover" />
       <View pointerEvents="none" style={styles.partnerLockVeil} />
       <View style={[styles.lockContent, styles.partnerLockContent]}>
         <Feather name="lock" size={24} color="#FFFFFF" strokeWidth={2.1} />
@@ -1229,9 +1257,9 @@ function LockedPhotoSlot({ height, image, label, onPress, t }: { height: number;
   );
 }
 
-function SendSlot({ height, label, message, onPress, t }: { height: number; label: string; message?: string; onPress: () => void; t: Copy }) {
+function SendSlot({ label, message, onPress, t }: { label: string; message?: string; onPress: () => void; t: Copy }) {
   return (
-    <Pressable onPress={onPress} style={[styles.dropSlot, styles.sendSlot, styles.emptyPhotoSlot, sideRadius('right'), { height }]}>
+    <Pressable onPress={onPress} style={[styles.dropSlot, styles.sendSlot, styles.emptyPhotoSlot, sideRadius('right')]}>
       <View style={styles.innerDashedSlot}>
         <View style={styles.plusCircle}>
           <Feather name="plus" size={20} color="#FFFFFF" strokeWidth={2.2} />
@@ -3460,21 +3488,20 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   photoPair: {
-    alignItems: 'flex-start',
+    alignItems: 'stretch',
     flexDirection: 'row',
     gap: 0,
+    height: DEFAULT_PHOTO_PAIR_HEIGHT,
     overflow: 'hidden',
     width: '100%',
   },
   dropSlot: {
     alignItems: 'center',
-    flexBasis: '50%',
-    flexGrow: 0,
-    flexShrink: 0,
+    flex: 1,
+    height: '100%',
     justifyContent: 'center',
-    maxWidth: '50%',
+    minWidth: 0,
     overflow: 'hidden',
-    width: '50%',
   },
   emptyPhotoSlot: {
     borderStyle: 'dashed',
@@ -3637,6 +3664,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: 'transparent',
     flex: 1,
+    height: '100%',
     justifyContent: 'center',
     width: '100%',
   },
