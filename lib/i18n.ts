@@ -90,6 +90,7 @@ type TranslationKey =
   | 'profileSaved'
   | 'recentDrops'
   | 'save'
+  | 'savePhoto'
   | 'sendDone'
   | 'sendMine'
   | 'settings'
@@ -100,6 +101,9 @@ type TranslationKey =
   | 'soloTodayHint'
   | 'startTogether'
   | 'socialSignInFailed'
+  | 'share'
+  | 'shareDropBody'
+  | 'shareToInstagramStory'
   | 'todayDrop'
   | 'todayOpen'
   | 'retakePhoto'
@@ -201,6 +205,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     profileSaved: '프로필이 저장되었어요.',
     recentDrops: 'Recent Drops',
     save: '저장',
+    savePhoto: '사진 저장',
     searchCountry: '나라 검색',
     sendDone: '보내기 완료',
     sendMine: '내 하루 보내기',
@@ -211,6 +216,9 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     soloTodayHint: '오늘의 질문은 먼저 받을 수 있어요.\n사진을 올리고 파트너를 연결해보세요.',
     startTogether: '둘만의 Daydrop을 시작해보세요.',
     socialSignInFailed: '소셜 로그인에 실패했어요.',
+    share: '공유하기',
+    shareDropBody: '오늘의 드롭을 스토리로 공유하거나 이미지로 저장할 수 있어요.',
+    shareToInstagramStory: 'Instagram Story로 공유',
     todayDrop: "Today's Drop",
     todayOpen: '오늘의 우리가 열렸어요.\n서로의 하루를 함께 볼 수 있어요.',
     retakePhoto: '삭제 후 다시 찍기',
@@ -311,6 +319,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     profileSaved: 'Profile saved.',
     recentDrops: 'Recent Drops',
     save: 'Save',
+    savePhoto: 'Save photo',
     searchCountry: 'Search country',
     sendDone: 'Sent',
     sendMine: 'Send my day',
@@ -321,6 +330,9 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     soloTodayHint: 'You can receive today\'s question first.\nUpload a photo, then connect your partner.',
     startTogether: 'Start your private Daydrop.',
     socialSignInFailed: 'Social sign-in failed.',
+    share: 'Share',
+    shareDropBody: 'Share today\'s drop to your story or save it as an image.',
+    shareToInstagramStory: 'Share to Instagram Story',
     todayDrop: "Today's Drop",
     todayOpen: 'Today is open.\nYou can see each other\'s day now.',
     retakePhoto: 'Delete and retake',

@@ -7,6 +7,7 @@ import * as Clipboard from 'expo-clipboard';
 import * as Device from 'expo-device';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ExpoLinking from 'expo-linking';
+import * as MediaLibrary from 'expo-media-library';
 import * as Notifications from 'expo-notifications';
 import React from 'react';
 import {
@@ -16,6 +17,7 @@ import {
   KeyboardAvoidingView,
   Linking,
   Modal,
+  PixelRatio,
   Platform,
   Pressable,
   RefreshControl,
@@ -29,6 +31,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { captureRef } from 'react-native-view-shot';
 
 import { PRIVACY_POLICY_URL, SUPPORT_EMAIL } from '@/constants/appConfig';
 import { getTranslations, normalizeLanguage, type Language } from '@/lib/i18n';
@@ -57,6 +60,7 @@ const EMPTY_MEMBERS: CoupleMember[] = [];
 const PERMISSION_INTRO_STORAGE_KEY = 'daydrop.hasSeenPermissionIntro';
 const PENDING_INVITE_CODE_STORAGE_KEY = 'daydrop.pendingInviteCode';
 const DEFAULT_PHOTO_PAIR_HEIGHT = 292;
+const SHARE_IMAGE_MAX_HEIGHT = 1600;
 const RECENT_THUMB_GROUP_WIDTH = 138;
 const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
 const RECENT_THUMB_DEFAULT_HEIGHT = 82;
@@ -72,6 +76,16 @@ type FeatherIconName = React.ComponentProps<typeof Feather>['name'];
 type FullImage = { canDelete?: boolean; image?: string; label: string; mission: string };
 type DropDetail = { drop: RecentDrop; state: DropState };
 type ImageSize = { height: number; width: number };
+type SharePhotoPair = { leftUri: string; rightUri: string };
+type ShareCanvasLayout = {
+  height: number;
+  key: number;
+  left: ImageSize;
+  leftUri: string;
+  right: ImageSize;
+  rightUri: string;
+  width: number;
+};
 type SafeImageResizeMode = React.ComponentProps<typeof Image>['resizeMode'];
 
 const ULTRA_WIDE_BACK_LENS_PATTERNS = ['ultra', '0.5', '초광각'];
@@ -235,15 +249,31 @@ function MissionContent({
   const [dropDetail, setDropDetail] = React.useState<DropDetail | null>(null);
   const [partnerMenuVisible, setPartnerMenuVisible] = React.useState(false);
   const [permissionIntroVisible, setPermissionIntroVisible] = React.useState(false);
+  const [shareSheetVisible, setShareSheetVisible] = React.useState(false);
   const [settingsVisible, setSettingsVisible] = React.useState(false);
   const [storedPendingInviteCode, setStoredPendingInviteCode] = React.useState<string | null>(null);
   const activePendingInviteCode = pendingInviteCode ?? storedPendingInviteCode;
   const activeMembers = today?.members ?? myCouple?.members ?? EMPTY_MEMBERS;
   const members = React.useMemo(() => splitMembers(activeMembers, myUserId), [activeMembers, myUserId]);
   const state = React.useMemo(() => getDropState(today, myUserId), [today, myUserId]);
+  const sharePhotoPair = React.useMemo(() => {
+    if (!today || state !== 'both') {
+      return null;
+    }
+
+    const { mine, partner } = splitSubmissions(today.submissions, myUserId);
+    if (!mine?.image_url || !partner?.image_url) {
+      return null;
+    }
+
+    return {
+      leftUri: partner.image_url,
+      rightUri: mine.image_url,
+    };
+  }, [myUserId, state, today]);
   const hasPartner = Boolean(today?.couple.status === 'active' && members.partner);
-  const hasUploadedToday = state === 'meOnly' || state === 'both';
-  const mainButtonDisabled = hasPartner ? hasUploadedToday || uploading || deletingPhoto : uploading || deletingPhoto;
+  const isTodayUnlocked = hasPartner && state === 'both';
+  const mainButtonDisabled = hasPartner ? (state === 'meOnly' || uploading || deletingPhoto) : uploading || deletingPhoto;
   const stateCopy = React.useMemo(() => getStateCopy(state, t, hasPartner), [hasPartner, state, t]);
   const meta = React.useMemo(() => buildMeta(members, language, t), [language, members, t]);
   const missionTitle = React.useMemo(() => getMissionPrompt(today?.mission, language), [language, today?.mission]);
@@ -486,7 +516,7 @@ function MissionContent({
 
             <Pressable
               disabled={mainButtonDisabled}
-              onPress={hasPartner ? handleUpload : openAddPartner}
+              onPress={isTodayUnlocked ? () => setShareSheetVisible(true) : hasPartner ? handleUpload : openAddPartner}
               style={[
                 styles.primaryButton,
                 mainButtonDisabled && styles.disabledButton,
@@ -500,7 +530,7 @@ function MissionContent({
                     styles.primaryButtonText,
                     mainButtonDisabled && styles.disabledButtonText,
                   ]}>
-                  {stateCopy.button}
+                  {isTodayUnlocked ? t.share : stateCopy.button}
                 </Text>
               )}
             </Pressable>
@@ -562,6 +592,7 @@ function MissionContent({
         t={t}
         onClose={() => setDropDetail(null)}
       />
+      <TodayShareSheet language={language} photoPair={sharePhotoPair} t={t} visible={shareSheetVisible} onClose={() => setShareSheetVisible(false)} />
       <SettingsSheet
         language={language}
         profile={profile}
@@ -844,7 +875,7 @@ function DaydropCameraModal({
                   animateShutter
                   facing={facing}
                   flash={flash}
-                  mirror={false}
+                  mirror={facing === 'front'}
                   mode="picture"
                   selectedLens={selectedLens}
                   onAvailableLensesChanged={({ lenses }) => {
@@ -859,7 +890,7 @@ function DaydropCameraModal({
                       void cameraRef.current?.getAvailableLensesAsync().then(updateDefaultBackLens).catch(() => undefined);
                     }
                   }}
-                  style={[styles.cameraPreview, facing === 'front' && styles.cameraPreviewMirrored]}
+                  style={styles.cameraPreview}
                 />
               )}
             </View>
@@ -1546,6 +1577,179 @@ function DropDetailModal({
           </View>
         </View>
       </View>
+    </Modal>
+  );
+}
+
+function TodayShareSheet({
+  language,
+  onClose,
+  photoPair,
+  t,
+  visible,
+}: {
+  language: Language;
+  onClose: () => void;
+  photoPair: SharePhotoPair | null;
+  t: Copy;
+  visible: boolean;
+}) {
+  const insets = useSafeAreaInsets();
+  const captureViewRef = React.useRef<View>(null);
+  const imageLoadCountRef = React.useRef(0);
+  const imageLoadRejectRef = React.useRef<((error: Error) => void) | null>(null);
+  const imageLoadResolveRef = React.useRef<(() => void) | null>(null);
+  const [canvasLayout, setCanvasLayout] = React.useState<ShareCanvasLayout | null>(null);
+  const [saving, setSaving] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!visible) {
+      setCanvasLayout(null);
+      setSaving(false);
+    }
+  }, [visible]);
+
+  const handleCanvasImageLoad = () => {
+    imageLoadCountRef.current += 1;
+    if (imageLoadCountRef.current >= 2) {
+      imageLoadResolveRef.current?.();
+      imageLoadResolveRef.current = null;
+      imageLoadRejectRef.current = null;
+    }
+  };
+
+  const handleCanvasImageError = () => {
+    imageLoadRejectRef.current?.(new Error('photo_read_failed'));
+    imageLoadResolveRef.current = null;
+    imageLoadRejectRef.current = null;
+  };
+
+  const handleSavePhoto = async () => {
+    if (saving) {
+      return;
+    }
+
+    if (!photoPair) {
+      Alert.alert(t.savePhoto, t.photoReadError);
+      return;
+    }
+
+    try {
+      setSaving(true);
+      const available = await MediaLibrary.isAvailableAsync();
+      if (!available) {
+        throw new Error('media_library_unavailable');
+      }
+
+      const permission = await MediaLibrary.requestPermissionsAsync(true, ['photo']);
+      if (!permission.granted) {
+        Alert.alert(t.photoPermission, language === 'ko' ? '앨범 저장 권한을 허용해주세요.' : 'Please allow photo saving access.');
+        return;
+      }
+
+      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(photoPair.leftUri), getRemoteImageSize(photoPair.rightUri)]);
+      const nextLayout = createShareCanvasLayout(photoPair, leftSize, rightSize);
+      const imageLoadPromise = new Promise<void>((resolve, reject) => {
+        imageLoadCountRef.current = 0;
+        imageLoadResolveRef.current = resolve;
+        imageLoadRejectRef.current = reject;
+      });
+
+      setCanvasLayout(nextLayout);
+      await imageLoadPromise;
+      await waitForNextFrame();
+
+      if (!captureViewRef.current) {
+        throw new Error('capture_view_missing');
+      }
+
+      const pixelRatio = PixelRatio.get();
+      const savedUri = await captureRef(captureViewRef, {
+        format: 'png',
+        height: nextLayout.height / pixelRatio,
+        quality: 1,
+        result: 'tmpfile',
+        width: nextLayout.width / pixelRatio,
+      });
+
+      await MediaLibrary.saveToLibraryAsync(savedUri);
+      setCanvasLayout(null);
+      onClose();
+      Alert.alert(t.savePhoto, language === 'ko' ? '앨범에 저장했어요.' : 'Saved to your album.');
+    } catch (nextError) {
+      console.error('save today drop photo failed', nextError);
+      Alert.alert(t.savePhoto, nextError instanceof Error && nextError.message === 'photo_read_failed' ? t.photoReadError : t.unknownError);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal animationType="slide" transparent visible={visible} onRequestClose={onClose}>
+      <Pressable style={styles.sheetBackdrop} onPress={onClose}>
+        <Pressable style={[styles.shareSheet, { paddingBottom: Math.max(insets.bottom + 18, 28) }]}>
+          <View style={styles.sheetHandle} />
+          <Text allowFontScaling={false} style={styles.shareSheetTitle}>
+            {t.share}
+          </Text>
+          <Text allowFontScaling={false} style={styles.shareSheetBody}>
+            {t.shareDropBody}
+          </Text>
+          <View style={styles.shareOptions}>
+            <Pressable style={styles.shareOption}>
+              <View style={styles.shareOptionIcon}>
+                <Feather name="instagram" size={21} color="#111111" />
+              </View>
+              <Text allowFontScaling={false} numberOfLines={1} style={styles.shareOptionText}>
+                {t.shareToInstagramStory}
+              </Text>
+            </Pressable>
+            <Pressable disabled={saving} onPress={handleSavePhoto} style={[styles.shareOption, saving && styles.shareOptionDisabled]}>
+              <View style={styles.shareOptionIcon}>
+                {saving ? <ActivityIndicator color="#111111" /> : <Feather name="download" size={21} color="#111111" />}
+              </View>
+              <Text allowFontScaling={false} numberOfLines={1} style={styles.shareOptionText}>
+                {t.savePhoto}
+              </Text>
+            </Pressable>
+          </View>
+          {canvasLayout ? (
+            <View
+              collapsable={false}
+              ref={captureViewRef}
+              style={[
+                styles.shareCaptureCanvas,
+                {
+                  height: canvasLayout.height / PixelRatio.get(),
+                  width: canvasLayout.width / PixelRatio.get(),
+                },
+              ]}>
+              <Image
+                key={`left-${canvasLayout.key}`}
+                onError={handleCanvasImageError}
+                onLoad={handleCanvasImageLoad}
+                resizeMode="contain"
+                source={{ uri: canvasLayout.leftUri }}
+                style={{
+                  height: canvasLayout.left.height / PixelRatio.get(),
+                  width: canvasLayout.left.width / PixelRatio.get(),
+                }}
+              />
+              <Image
+                key={`right-${canvasLayout.key}`}
+                onError={handleCanvasImageError}
+                onLoad={handleCanvasImageLoad}
+                resizeMode="contain"
+                source={{ uri: canvasLayout.rightUri }}
+                style={{
+                  height: canvasLayout.right.height / PixelRatio.get(),
+                  width: canvasLayout.right.width / PixelRatio.get(),
+                }}
+              />
+            </View>
+          ) : null}
+        </Pressable>
+      </Pressable>
     </Modal>
   );
 }
@@ -2325,6 +2529,52 @@ function useImageSize(image?: string): ImageSize | null {
   }, [image]);
 
   return size;
+}
+
+function getRemoteImageSize(image: string): Promise<ImageSize> {
+  return new Promise((resolve, reject) => {
+    Image.getSize(
+      image,
+      (width, height) => {
+        if (width > 0 && height > 0) {
+          resolve({ height, width });
+        } else {
+          reject(new Error('photo_read_failed'));
+        }
+      },
+      () => reject(new Error('photo_read_failed'))
+    );
+  });
+}
+
+function createShareCanvasLayout(pair: SharePhotoPair, leftSize: ImageSize, rightSize: ImageSize): ShareCanvasLayout {
+  const targetHeight = Math.max(1, Math.min(SHARE_IMAGE_MAX_HEIGHT, leftSize.height, rightSize.height));
+  const leftWidth = Math.max(1, Math.round(leftSize.width * (targetHeight / leftSize.height)));
+  const rightWidth = Math.max(1, Math.round(rightSize.width * (targetHeight / rightSize.height)));
+
+  return {
+    height: targetHeight,
+    key: Date.now(),
+    left: {
+      height: targetHeight,
+      width: leftWidth,
+    },
+    leftUri: pair.leftUri,
+    right: {
+      height: targetHeight,
+      width: rightWidth,
+    },
+    rightUri: pair.rightUri,
+    width: leftWidth + rightWidth,
+  };
+}
+
+function waitForNextFrame() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve());
+    });
+  });
 }
 
 function calculateImageHeight(slotWidth: number, size: ImageSize | null, fallbackHeight: number) {
@@ -3265,9 +3515,6 @@ const styles = StyleSheet.create({
     height: '100%',
     width: '100%',
   },
-  cameraPreviewMirrored: {
-    transform: [{ scaleX: -1 }],
-  },
   cameraControls: {
     alignItems: 'center',
     flexDirection: 'row',
@@ -4099,6 +4346,63 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 22,
     padding: 18,
     paddingBottom: 28,
+  },
+  shareSheet: {
+    backgroundColor: '#FEFDFB',
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingHorizontal: 18,
+    paddingTop: 14,
+  },
+  shareSheetTitle: {
+    color: '#050505',
+    fontSize: 22,
+    fontWeight: '800',
+    marginBottom: 6,
+  },
+  shareSheetBody: {
+    color: '#666666',
+    fontSize: 14,
+    fontWeight: '500',
+    lineHeight: 20,
+    marginBottom: 16,
+  },
+  shareOptions: {
+    gap: 8,
+  },
+  shareOption: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#EAEAEA',
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: 'row',
+    minHeight: 54,
+    paddingHorizontal: 14,
+  },
+  shareOptionDisabled: {
+    opacity: 0.6,
+  },
+  shareOptionIcon: {
+    alignItems: 'center',
+    height: 28,
+    justifyContent: 'center',
+    marginRight: 12,
+    width: 28,
+  },
+  shareOptionText: {
+    color: '#111111',
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  shareCaptureCanvas: {
+    backgroundColor: 'transparent',
+    flexDirection: 'row',
+    left: -10000,
+    overflow: 'hidden',
+    position: 'absolute',
+    top: -10000,
   },
   detailHeader: {
     alignItems: 'flex-start',

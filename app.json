@@ -60,6 +60,16 @@
           "recordAudioAndroid": false
         }
       ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Daydrop uses your photo library so you can choose a daily photo to share.",
+          "savePhotosPermission": "Daydrop saves photos only when you choose to save them.",
+          "granularPermissions": [
+            "photo"
+          ]
+        }
+      ],
       "expo-apple-authentication",
       "expo-web-browser",
       "expo-notifications"

@@ -75,7 +75,17 @@ export async function takePhotoWithCamera(cameraFacing: CameraFacing = 'front') 
 }
 
 export async function normalizeCameraPhoto(asset: DaydropPhotoAsset, source: CameraFacing): Promise<NormalizedPhotoAsset> {
-  return normalizePickedImage(asset, source, { flipFrontCameraByDefault: true });
+  return normalizePickedImage(
+    {
+      ...asset,
+      exif: {
+        ...(asset.exif ?? {}),
+        daydropMirrorNormalized: source === 'front' ? true : asset.exif?.daydropMirrorNormalized,
+      },
+    },
+    source,
+    { flipFrontCameraByDefault: false }
+  );
 }
 
 async function normalizePickedImage(
