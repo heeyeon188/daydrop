@@ -1807,9 +1807,6 @@ function TodayShareSheet({
       console.log('[share] captured uri', storyUri);
 
       const shareUri = await prepareCapturedStoryFile(storyUri);
-      console.log('[share] Instagram direct share attempt');
-      console.warn('[share] Instagram direct share fail', 'Expo Linking.openURL cannot attach a generated image as an Instagram Story background asset.');
-
       await shareStoryFileFallback(shareUri, language);
       setStoryLayout(null);
       onClose();
@@ -2883,7 +2880,8 @@ async function prepareCapturedStoryFile(uri: string) {
     return uri;
   }
 
-  const shareUri = `${FileSystem.cacheDirectory}daydrop-story-${Date.now()}.png`;
+  const shareUri = `${FileSystem.cacheDirectory}daydrop.png`;
+  await FileSystem.deleteAsync(shareUri, { idempotent: true });
   await FileSystem.copyAsync({ from: uri, to: shareUri });
   const shareInfo = await FileSystem.getInfoAsync(shareUri);
   console.log('[share] captured file exists', shareInfo.exists);
