@@ -387,7 +387,15 @@ function MissionContent({
         coupleId: today.daily_drop.couple_id,
         dropId: today.daily_drop.id,
         fileInfo: {
+          base64Used: Boolean(picked.base64),
+          capturedUri: asset.uri,
+          compressApplied: picked.compressed === true,
           height: picked.height,
+          originalHeight: asset.height,
+          originalWidth: asset.width,
+          reencodeApplied: picked.reencoded === true,
+          resizeApplied: picked.resized === true,
+          uploadUri: picked.uploadUri ?? picked.uri,
           uri: picked.uri,
           width: picked.width,
         },
@@ -770,7 +778,7 @@ function DaydropCameraModal({
       const photo = await camera.takePictureAsync({
         base64: true,
         exif: true,
-        quality: 0.9,
+        quality: 1,
       });
 
       if (!photo?.base64) {
@@ -794,11 +802,20 @@ function DaydropCameraModal({
 
       console.log('[DaydropCamera] captured', {
         facing: captureFacing,
+        capturedUri: photo.uri,
+        uploadUri: normalized.uploadUri ?? normalized.uri,
+        originalWidth: photo.width,
+        originalHeight: photo.height,
         width: normalized.width,
         height: normalized.height,
+        base64Used: Boolean(normalized.base64),
         orientation: normalized.exif?.Orientation ?? normalized.exif?.orientation ?? null,
         mirrorMode: normalized.mirrorMode ?? 'none',
+        resizeApplied: normalized.resized === true,
+        compressApplied: normalized.compressed === true,
+        reencodeApplied: normalized.reencoded === true,
         didFlip: normalized.didFlip === true,
+        fileSize: await getLocalFileSize(normalized.uploadUri ?? normalized.uri),
       });
 
       setCaptured({ ...normalized, source: captureFacing });
@@ -917,6 +934,7 @@ function DaydropCameraModal({
                     if (facing === 'back') {
                       void cameraRef.current?.getAvailableLensesAsync().then(updateDefaultBackLens).catch(() => undefined);
                     }
+                    void logAvailablePictureSizes(cameraRef.current, facing);
                   }}
                   style={styles.cameraPreview}
                 />
@@ -967,6 +985,25 @@ function DaydropCameraModal({
       </SafeAreaView>
     </Modal>
   );
+}
+
+async function logAvailablePictureSizes(camera: CameraView | null, facing: CameraType) {
+  if (!camera) {
+    return;
+  }
+
+  try {
+    const sizes = await camera.getAvailablePictureSizesAsync();
+    console.log('[DaydropCamera] available picture sizes', {
+      facing,
+      sizes,
+      selectedPictureSize: null,
+      applied: false,
+      reason: 'pictureSize changes capture ratio and can affect preview framing, so it is logged only',
+    });
+  } catch (error) {
+    console.warn('[DaydropCamera] picture size lookup failed', { facing, error });
+  }
 }
 
 function PartnerPill({ count, onPress }: { count: number; onPress: () => void }) {
@@ -2917,6 +2954,16 @@ async function shareStoryFileFallback(uri: string, language: Language) {
     message: language === 'ko' ? 'Daydrop 스토리 이미지' : 'Daydrop story image',
     url: uri,
   });
+}
+
+async function getLocalFileSize(uri: string) {
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    return info.exists ? info.size ?? null : null;
+  } catch (error) {
+    console.warn('[photo] file size lookup failed', { uri, error });
+    return null;
+  }
 }
 
 function waitForNextFrame() {

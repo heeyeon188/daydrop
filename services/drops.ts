@@ -28,7 +28,15 @@ export async function submitDropPhoto({
   coupleId: string;
   dropId: string;
   fileInfo?: {
+    base64Used?: boolean;
+    capturedUri?: string;
+    compressApplied?: boolean;
     height: number;
+    originalHeight?: number;
+    originalWidth?: number;
+    reencodeApplied?: boolean;
+    resizeApplied?: boolean;
+    uploadUri?: string;
     uri: string;
     width: number;
   };
@@ -41,7 +49,26 @@ export async function submitDropPhoto({
     fileInfo,
   });
 
-  const uploaded = await uploadDropImage({ base64, coupleId, dropId, userId });
+  const uploaded = await uploadDropImage({
+    base64,
+    coupleId,
+    dropId,
+    fileInfo: fileInfo
+      ? {
+          base64Used: fileInfo.base64Used,
+          capturedUri: fileInfo.capturedUri ?? fileInfo.uri,
+          compressApplied: fileInfo.compressApplied,
+          height: fileInfo.height,
+          originalHeight: fileInfo.originalHeight,
+          originalWidth: fileInfo.originalWidth,
+          reencodeApplied: fileInfo.reencodeApplied,
+          resizeApplied: fileInfo.resizeApplied,
+          uploadUri: fileInfo.uploadUri ?? fileInfo.uri,
+          width: fileInfo.width,
+        }
+      : undefined,
+    userId,
+  });
 
   const { data, error } = await supabase
     .from('drop_submissions')
