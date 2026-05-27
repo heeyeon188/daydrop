@@ -7,11 +7,12 @@ import * as Clipboard from 'expo-clipboard';
 import * as Device from 'expo-device';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as ExpoLinking from 'expo-linking';
-import * as MediaLibrary from 'expo-media-library';
 import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import React from 'react';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 import {
   ActivityIndicator,
   Alert,
@@ -20,7 +21,6 @@ import {
   LayoutChangeEvent,
   Linking,
   Modal,
-  PixelRatio,
   Platform,
   Pressable,
   RefreshControl,
@@ -31,6 +31,7 @@ import {
   Switch,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -63,7 +64,6 @@ const EMPTY_MEMBERS: CoupleMember[] = [];
 const PERMISSION_INTRO_STORAGE_KEY = 'daydrop.hasSeenPermissionIntro';
 const PENDING_INVITE_CODE_STORAGE_KEY = 'daydrop.pendingInviteCode';
 const DEFAULT_PHOTO_PAIR_HEIGHT = 292;
-const SHARE_IMAGE_MAX_HEIGHT = 1600;
 const STORY_TEMPLATE_BASE_WIDTH = 360;
 const STORY_TEMPLATE_BASE_HEIGHT = 640;
 const STORY_TEMPLATE_PHOTO_WIDTH = 344;
@@ -92,13 +92,11 @@ type ShareStoryData = SharePhotoPair & {
   rightLocation: string;
   rightName: string;
 };
-type ShareCanvasLayout = {
+type PhotoPreviewLayout = SharePhotoPair & {
   height: number;
   key: number;
   left: ImageSize;
-  leftUri: string;
   right: ImageSize;
-  rightUri: string;
   width: number;
 };
 type ShareStoryLayout = ShareStoryData & {
@@ -1625,47 +1623,29 @@ function TodayShareSheet({
   visible: boolean;
 }) {
   const insets = useSafeAreaInsets();
-  const captureViewRef = React.useRef<View>(null);
+  const windowDimensions = useWindowDimensions();
   const storyCaptureViewRef = React.useRef<View>(null);
-  const imageLoadCountRef = React.useRef(0);
-  const imageLoadRejectRef = React.useRef<((error: Error) => void) | null>(null);
-  const imageLoadResolveRef = React.useRef<(() => void) | null>(null);
   const storyImageLoadCountRef = React.useRef(0);
   const storyReadyRejectRef = React.useRef<((error: Error) => void) | null>(null);
   const storyReadyResolveRef = React.useRef<(() => void) | null>(null);
   const storyTemplateLaidOutRef = React.useRef(false);
-  const [canvasLayout, setCanvasLayout] = React.useState<ShareCanvasLayout | null>(null);
+  const [photoPreviewLayout, setPhotoPreviewLayout] = React.useState<PhotoPreviewLayout | null>(null);
+  const [photoPreviewLoading, setPhotoPreviewLoading] = React.useState(false);
   const [storyLayout, setStoryLayout] = React.useState<ShareStoryLayout | null>(null);
-  const [saving, setSaving] = React.useState(false);
   const [sharingStory, setSharingStory] = React.useState(false);
 
   React.useEffect(() => {
     if (!visible) {
-      setCanvasLayout(null);
+      setPhotoPreviewLayout(null);
+      setPhotoPreviewLoading(false);
       setStoryLayout(null);
       storyImageLoadCountRef.current = 0;
       storyReadyRejectRef.current = null;
       storyReadyResolveRef.current = null;
       storyTemplateLaidOutRef.current = false;
-      setSaving(false);
       setSharingStory(false);
     }
   }, [visible]);
-
-  const handleCanvasImageLoad = () => {
-    imageLoadCountRef.current += 1;
-    if (imageLoadCountRef.current >= 2) {
-      imageLoadResolveRef.current?.();
-      imageLoadResolveRef.current = null;
-      imageLoadRejectRef.current = null;
-    }
-  };
-
-  const handleCanvasImageError = () => {
-    imageLoadRejectRef.current?.(new Error('photo_read_failed'));
-    imageLoadResolveRef.current = null;
-    imageLoadRejectRef.current = null;
-  };
 
   const resolveStoryTemplateIfReady = () => {
     if (storyTemplateLaidOutRef.current && storyImageLoadCountRef.current >= 2) {
@@ -1694,63 +1674,25 @@ function TodayShareSheet({
     storyReadyRejectRef.current = null;
   };
 
-  const handleSavePhoto = async () => {
-    if (saving) {
+  const handleViewPhoto = async () => {
+    if (photoPreviewLoading) {
       return;
     }
 
     if (!shareData) {
-      Alert.alert(t.savePhoto, t.photoReadError);
+      Alert.alert(t.photoView, t.photoReadError);
       return;
     }
 
     try {
-      setSaving(true);
-      const available = await MediaLibrary.isAvailableAsync();
-      if (!available) {
-        throw new Error('media_library_unavailable');
-      }
-
-      const permission = await MediaLibrary.requestPermissionsAsync(true, ['photo']);
-      if (!permission.granted) {
-        Alert.alert(t.photoPermission, language === 'ko' ? '앨범 저장 권한을 허용해주세요.' : 'Please allow photo saving access.');
-        return;
-      }
-
+      setPhotoPreviewLoading(true);
       const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(shareData.leftUri), getRemoteImageSize(shareData.rightUri)]);
-      const nextLayout = createShareCanvasLayout(shareData, leftSize, rightSize);
-      const imageLoadPromise = new Promise<void>((resolve, reject) => {
-        imageLoadCountRef.current = 0;
-        imageLoadResolveRef.current = resolve;
-        imageLoadRejectRef.current = reject;
-      });
-
-      setCanvasLayout(nextLayout);
-      await imageLoadPromise;
-      await waitForNextFrame();
-
-      if (!captureViewRef.current) {
-        throw new Error('capture_view_missing');
-      }
-
-      const pixelRatio = PixelRatio.get();
-      const savedUri = await captureRef(captureViewRef, {
-        format: 'png',
-        height: nextLayout.height / pixelRatio,
-        quality: 1,
-        result: 'tmpfile',
-        width: nextLayout.width / pixelRatio,
-      });
-
-      await MediaLibrary.saveToLibraryAsync(savedUri);
-      setCanvasLayout(null);
-      onClose();
-      Alert.alert(t.savePhoto, language === 'ko' ? '앨범에 저장했어요.' : 'Saved to your album.');
+      setPhotoPreviewLayout(createPhotoPreviewLayout(shareData, leftSize, rightSize, windowDimensions.width, windowDimensions.height, insets));
     } catch (nextError) {
-      console.error('save today drop photo failed', nextError);
-      Alert.alert(t.savePhoto, nextError instanceof Error && nextError.message === 'photo_read_failed' ? t.photoReadError : t.unknownError);
+      console.error('view today drop photo failed', nextError);
+      Alert.alert(t.photoView, nextError instanceof Error && nextError.message === 'photo_read_failed' ? t.photoReadError : t.unknownError);
     } finally {
-      setSaving(false);
+      setPhotoPreviewLoading(false);
     }
   };
 
@@ -1832,56 +1774,22 @@ function TodayShareSheet({
           <View style={styles.shareOptions}>
             <Pressable disabled={sharingStory} onPress={handleShareInstagramStory} style={[styles.shareOption, sharingStory && styles.shareOptionDisabled]}>
               <View style={styles.shareOptionIcon}>
-                {sharingStory ? <ActivityIndicator color="#111111" /> : <Feather name="instagram" size={21} color="#111111" />}
+                {sharingStory ? <ActivityIndicator color="#111111" /> : <Feather name="share-2" size={21} color="#111111" />}
               </View>
               <Text allowFontScaling={false} numberOfLines={1} style={styles.shareOptionText}>
                 {t.shareToInstagramStory}
               </Text>
             </Pressable>
-            <Pressable disabled={saving} onPress={handleSavePhoto} style={[styles.shareOption, saving && styles.shareOptionDisabled]}>
+            <Pressable disabled={photoPreviewLoading} onPress={handleViewPhoto} style={[styles.shareOption, photoPreviewLoading && styles.shareOptionDisabled]}>
               <View style={styles.shareOptionIcon}>
-                {saving ? <ActivityIndicator color="#111111" /> : <Feather name="download" size={21} color="#111111" />}
+                {photoPreviewLoading ? <ActivityIndicator color="#111111" /> : <Feather name="image" size={21} color="#111111" />}
               </View>
               <Text allowFontScaling={false} numberOfLines={1} style={styles.shareOptionText}>
-                {t.savePhoto}
+                {t.photoView}
               </Text>
             </Pressable>
           </View>
-          {canvasLayout ? (
-            <View
-              collapsable={false}
-              ref={captureViewRef}
-              style={[
-                styles.shareCaptureCanvas,
-                {
-                  height: canvasLayout.height / PixelRatio.get(),
-                  width: canvasLayout.width / PixelRatio.get(),
-                },
-              ]}>
-              <Image
-                key={`left-${canvasLayout.key}`}
-                onError={handleCanvasImageError}
-                onLoad={handleCanvasImageLoad}
-                resizeMode="contain"
-                source={{ uri: canvasLayout.leftUri }}
-                style={{
-                  height: canvasLayout.left.height / PixelRatio.get(),
-                  width: canvasLayout.left.width / PixelRatio.get(),
-                }}
-              />
-              <Image
-                key={`right-${canvasLayout.key}`}
-                onError={handleCanvasImageError}
-                onLoad={handleCanvasImageLoad}
-                resizeMode="contain"
-                source={{ uri: canvasLayout.rightUri }}
-                style={{
-                  height: canvasLayout.right.height / PixelRatio.get(),
-                  width: canvasLayout.right.width / PixelRatio.get(),
-                }}
-              />
-            </View>
-          ) : null}
+          <PhotoPreviewModal layout={photoPreviewLayout} onClose={() => setPhotoPreviewLayout(null)} visible={Boolean(photoPreviewLayout)} />
           {storyLayout ? (
             <View
               collapsable={false}
@@ -1957,6 +1865,94 @@ function TodayShareSheet({
           ) : null}
         </Pressable>
       </Pressable>
+    </Modal>
+  );
+}
+
+function PhotoPreviewModal({ layout, onClose, visible }: { layout: PhotoPreviewLayout | null; onClose: () => void; visible: boolean }) {
+  const scale = useSharedValue(1);
+  const startScale = useSharedValue(1);
+  const translateX = useSharedValue(0);
+  const translateY = useSharedValue(0);
+  const startTranslateX = useSharedValue(0);
+  const startTranslateY = useSharedValue(0);
+
+  React.useEffect(() => {
+    scale.value = 1;
+    startScale.value = 1;
+    translateX.value = 0;
+    translateY.value = 0;
+    startTranslateX.value = 0;
+    startTranslateY.value = 0;
+  }, [layout?.key, scale, startScale, startTranslateX, startTranslateY, translateX, translateY, visible]);
+
+  const pinchGesture = Gesture.Pinch()
+    .onStart(() => {
+      startScale.value = scale.value;
+    })
+    .onUpdate((event) => {
+      scale.value = Math.max(1, Math.min(startScale.value * event.scale, 5));
+    })
+    .onEnd(() => {
+      startScale.value = scale.value;
+      if (scale.value <= 1) {
+        translateX.value = 0;
+        translateY.value = 0;
+        startTranslateX.value = 0;
+        startTranslateY.value = 0;
+      }
+    });
+
+  const panGesture = Gesture.Pan()
+    .onStart(() => {
+      startTranslateX.value = translateX.value;
+      startTranslateY.value = translateY.value;
+    })
+    .onUpdate((event) => {
+      if (scale.value <= 1) {
+        translateX.value = 0;
+        translateY.value = 0;
+        return;
+      }
+
+      translateX.value = startTranslateX.value + event.translationX;
+      translateY.value = startTranslateY.value + event.translationY;
+    })
+    .onEnd(() => {
+      startTranslateX.value = translateX.value;
+      startTranslateY.value = translateY.value;
+    });
+
+  const previewGesture = Gesture.Simultaneous(pinchGesture, panGesture);
+  const previewAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: translateX.value }, { translateY: translateY.value }, { scale: scale.value }],
+  }));
+
+  return (
+    <Modal animationType="fade" transparent visible={visible} onRequestClose={onClose}>
+      <View style={styles.photoPreviewBackdrop}>
+        <Pressable accessibilityRole="button" onPress={onClose} style={styles.photoPreviewClose}>
+          <Feather name="x" size={24} color="#FFFFFF" />
+        </Pressable>
+        {layout ? (
+          <GestureDetector gesture={previewGesture}>
+            <Animated.View style={[styles.photoPreviewRow, { height: layout.height, width: layout.width }, previewAnimatedStyle]}>
+              <Image
+                key={`preview-left-${layout.key}`}
+                resizeMode="contain"
+                source={{ uri: layout.leftUri }}
+                style={{ height: layout.left.height, width: layout.left.width }}
+              />
+              <Image
+                key={`preview-right-${layout.key}`}
+                resizeMode="contain"
+                source={{ uri: layout.rightUri }}
+                style={{ height: layout.right.height, width: layout.right.width }}
+              />
+            </Animated.View>
+          </GestureDetector>
+        ) : null}
+      </View>
     </Modal>
   );
 }
@@ -2754,10 +2750,21 @@ function getRemoteImageSize(image: string): Promise<ImageSize> {
   });
 }
 
-function createShareCanvasLayout(pair: SharePhotoPair, leftSize: ImageSize, rightSize: ImageSize): ShareCanvasLayout {
-  const targetHeight = Math.max(1, Math.min(SHARE_IMAGE_MAX_HEIGHT, leftSize.height, rightSize.height));
-  const leftWidth = Math.max(1, Math.round(leftSize.width * (targetHeight / leftSize.height)));
-  const rightWidth = Math.max(1, Math.round(rightSize.width * (targetHeight / rightSize.height)));
+function createPhotoPreviewLayout(
+  pair: SharePhotoPair,
+  leftSize: ImageSize,
+  rightSize: ImageSize,
+  windowWidth: number,
+  windowHeight: number,
+  insets: { bottom: number; top: number }
+): PhotoPreviewLayout {
+  const leftRatio = leftSize.width / leftSize.height;
+  const rightRatio = rightSize.width / rightSize.height;
+  const maxWidth = Math.max(1, windowWidth);
+  const maxHeight = Math.max(1, windowHeight - insets.top - insets.bottom - 108);
+  const targetHeight = Math.max(1, Math.min(maxHeight, maxWidth / (leftRatio + rightRatio)));
+  const leftWidth = Math.max(1, Math.round(targetHeight * leftRatio));
+  const rightWidth = Math.max(1, Math.round(targetHeight * rightRatio));
 
   return {
     height: targetHeight,
@@ -2899,7 +2906,7 @@ async function shareStoryFileFallback(uri: string, language: Language) {
   const isAvailable = await Sharing.isAvailableAsync();
   if (isAvailable) {
     await Sharing.shareAsync(uri, {
-      dialogTitle: language === 'ko' ? 'Instagram Story로 공유' : 'Share to Instagram Story',
+      dialogTitle: language === 'ko' ? '공유하기' : 'Share',
       mimeType: 'image/png',
       UTI: 'public.png',
     });
@@ -4743,13 +4750,28 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
   },
-  shareCaptureCanvas: {
-    backgroundColor: 'transparent',
-    flexDirection: 'row',
-    left: -10000,
-    overflow: 'hidden',
+  photoPreviewBackdrop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.94)',
+    flex: 1,
+    justifyContent: 'center',
+  },
+  photoPreviewClose: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.14)',
+    borderRadius: 22,
+    height: 44,
+    justifyContent: 'center',
     position: 'absolute',
-    top: -10000,
+    right: 18,
+    top: 58,
+    width: 44,
+    zIndex: 2,
+  },
+  photoPreviewRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
   },
   storyCaptureCanvas: {
     alignItems: 'center',

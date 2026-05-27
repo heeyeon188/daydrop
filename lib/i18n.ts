@@ -84,13 +84,13 @@ type TranslationKey =
   | 'pending'
   | 'photoPermission'
   | 'photoReadError'
+  | 'photoView'
   | 'pickPhotoTitle'
   | 'profile'
   | 'profileSaveError'
   | 'profileSaved'
   | 'recentDrops'
   | 'save'
-  | 'savePhoto'
   | 'sendDone'
   | 'sendMine'
   | 'settings'
@@ -199,13 +199,13 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     pending: '대기 중',
     photoPermission: '사진 접근 권한이 필요해요.',
     photoReadError: '이미지를 읽지 못했어요. 다시 선택해주세요.',
+    photoView: '사진 보기',
     pickPhotoTitle: '오늘의 사진을 어떻게 보낼까요?',
     profile: '프로필',
     profileSaveError: '프로필 저장 실패',
     profileSaved: '프로필이 저장되었어요.',
     recentDrops: 'Recent Drops',
     save: '저장',
-    savePhoto: '사진 저장',
     searchCountry: '나라 검색',
     sendDone: '보내기 완료',
     sendMine: '내 하루 보내기',
@@ -217,8 +217,8 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     startTogether: '둘만의 Daydrop을 시작해보세요.',
     socialSignInFailed: '소셜 로그인에 실패했어요.',
     share: '공유하기',
-    shareDropBody: '오늘의 드롭을 스토리로 공유하거나 이미지로 저장할 수 있어요.',
-    shareToInstagramStory: 'Instagram Story로 공유',
+    shareDropBody: '오늘의 드롭을 공유하거나 사진을 크게 볼 수 있어요.',
+    shareToInstagramStory: '공유하기',
     todayDrop: "Today's Drop",
     todayOpen: '오늘의 우리가 열렸어요.\n서로의 하루를 함께 볼 수 있어요.',
     retakePhoto: '삭제 후 다시 찍기',
@@ -313,13 +313,13 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     pending: 'Waiting',
     photoPermission: 'Photo permission is required.',
     photoReadError: 'Could not read the image. Please try again.',
+    photoView: 'View photo',
     pickPhotoTitle: 'How would you like to send today\'s photo?',
     profile: 'Profile',
     profileSaveError: 'Could not save profile',
     profileSaved: 'Profile saved.',
     recentDrops: 'Recent Drops',
     save: 'Save',
-    savePhoto: 'Save photo',
     searchCountry: 'Search country',
     sendDone: 'Sent',
     sendMine: 'Send my day',
@@ -331,8 +331,8 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     startTogether: 'Start your private Daydrop.',
     socialSignInFailed: 'Social sign-in failed.',
     share: 'Share',
-    shareDropBody: 'Share today\'s drop to your story or save it as an image.',
-    shareToInstagramStory: 'Share to Instagram Story',
+    shareDropBody: 'Share today\'s drop or view the photos larger.',
+    shareToInstagramStory: 'Share',
     todayDrop: "Today's Drop",
     todayOpen: 'Today is open.\nYou can see each other\'s day now.',
     retakePhoto: 'Delete and retake',
