@@ -9,6 +9,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as ExpoLinking from 'expo-linking';
 import * as MediaLibrary from 'expo-media-library';
 import * as Notifications from 'expo-notifications';
+import { router } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import React from 'react';
 import {
@@ -43,7 +44,7 @@ import { useProfile } from '@/hooks/useProfile';
 import { useSession } from '@/hooks/useSession';
 import { useTodayDrop } from '@/hooks/useTodayDrop';
 import { deleteAccount } from '@/services/account';
-import { signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut, signUpWithEmail } from '@/services/auth';
+import { signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut } from '@/services/auth';
 import { createCoupleInvite, joinCoupleByInviteCode, selectCouple, type MyCouple, type MyCoupleOption } from '@/services/couple';
 import { deleteMyTodayDropPhoto, submitDropPhoto } from '@/services/drops';
 import {
@@ -290,7 +291,7 @@ function MissionContent({
     }
 
     return {
-      date: formatDate(today.daily_drop.drop_date, language),
+      date: formatStoryDate(today.daily_drop.drop_date),
       leftLocation: formatLocation(members.partner, language, t.cityFallbackPartner),
       leftName: displayMemberName(members.partner, t.partner),
       leftUri: partner.image_url,
@@ -1896,55 +1897,37 @@ function TodayShareSheet({
                   width: storyLayout.width,
                 },
               ]}>
-              <View style={styles.storyTopBar}>
-                <View style={styles.storyProgressTrack}>
-                  <View style={styles.storyProgressFill} />
-                </View>
-                <View style={styles.storyHeaderRow}>
-                  <View style={styles.storyAvatarOuter}>
-                    <View style={styles.storyAvatarInner}>
-                      <View style={styles.storyAvatarHead} />
-                      <View style={styles.storyAvatarBody} />
-                    </View>
-                  </View>
-                  <Text allowFontScaling={false} style={styles.storyHeaderBrand}>
-                    DAYDROP
-                  </Text>
-                  <Text allowFontScaling={false} style={styles.storyHeaderTime}>
-                    {language === 'ko' ? '2시간' : '2h'}
-                  </Text>
-                  <Feather name="x" size={30} color="#FFFFFF" strokeWidth={2.35} style={styles.storyHeaderClose} />
-                </View>
-              </View>
               <Text allowFontScaling={false} style={styles.storyEyebrow}>
                 {"Today's Drop"}
               </Text>
               <Text allowFontScaling={false} style={styles.storyMission}>
                 {storyLayout.mission}
               </Text>
-              <View style={[styles.storyPhotoRow, { height: storyLayout.photoHeight, width: storyLayout.photoWidth }]}>
-                <Image
-                  key={`story-left-${storyLayout.key}`}
-                  onError={handleStoryImageError}
-                  onLoad={() => handleStoryImageLoad('left')}
-                  resizeMode="cover"
-                  source={{ uri: storyLayout.leftUri }}
-                  style={{
-                    height: storyLayout.leftPhoto.height,
-                    width: storyLayout.leftPhoto.width,
-                  }}
-                />
-                <Image
-                  key={`story-right-${storyLayout.key}`}
-                  onError={handleStoryImageError}
-                  onLoad={() => handleStoryImageLoad('right')}
-                  resizeMode="cover"
-                  source={{ uri: storyLayout.rightUri }}
-                  style={{
-                    height: storyLayout.rightPhoto.height,
-                    width: storyLayout.rightPhoto.width,
-                  }}
-                />
+              <View style={[styles.storyPhotoShadow, { height: storyLayout.photoHeight, width: storyLayout.photoWidth }]}>
+                <View style={[styles.storyPhotoRow, { height: storyLayout.photoHeight, width: storyLayout.photoWidth }]}>
+                  <Image
+                    key={`story-left-${storyLayout.key}`}
+                    onError={handleStoryImageError}
+                    onLoad={() => handleStoryImageLoad('left')}
+                    resizeMode="contain"
+                    source={{ uri: storyLayout.leftUri }}
+                    style={{
+                      height: storyLayout.leftPhoto.height,
+                      width: storyLayout.leftPhoto.width,
+                    }}
+                  />
+                  <Image
+                    key={`story-right-${storyLayout.key}`}
+                    onError={handleStoryImageError}
+                    onLoad={() => handleStoryImageLoad('right')}
+                    resizeMode="contain"
+                    source={{ uri: storyLayout.rightUri }}
+                    style={{
+                      height: storyLayout.rightPhoto.height,
+                      width: storyLayout.rightPhoto.width,
+                    }}
+                  />
+                </View>
               </View>
               <View style={[styles.storyNameRow, { width: storyLayout.photoWidth }]}>
                 <View style={styles.storyPersonBlock}>
@@ -2797,11 +2780,11 @@ function createShareCanvasLayout(pair: SharePhotoPair, leftSize: ImageSize, righ
 }
 
 function createShareStoryLayout(data: ShareStoryData, leftSize: ImageSize, rightSize: ImageSize, language: Language): ShareStoryLayout {
-  void leftSize;
-  void rightSize;
-  const photoHeight = STORY_TEMPLATE_PHOTO_HEIGHT;
-  const leftWidth = STORY_TEMPLATE_PHOTO_WIDTH / 2;
-  const rightWidth = STORY_TEMPLATE_PHOTO_WIDTH / 2;
+  const leftRatio = leftSize.width / leftSize.height;
+  const rightRatio = rightSize.width / rightSize.height;
+  const photoHeight = Math.max(1, Math.min(STORY_TEMPLATE_PHOTO_HEIGHT, STORY_TEMPLATE_PHOTO_WIDTH / (leftRatio + rightRatio)));
+  const leftWidth = Math.max(1, Math.round(photoHeight * leftRatio));
+  const rightWidth = Math.max(1, Math.round(photoHeight * rightRatio));
   const photoWidth = leftWidth + rightWidth;
 
   return {
@@ -2964,7 +2947,6 @@ function LanguageButton({ active, disabled, label, onPress }: { active: boolean;
 
 function AuthScreen({ language }: { language: Language }) {
   const t = getTranslations(language);
-  const [mode, setMode] = React.useState<'login' | 'signup'>('login');
   const [email, setEmail] = React.useState('');
   const [password, setPassword] = React.useState('');
   const [loading, setLoading] = React.useState(false);
@@ -3009,12 +2991,7 @@ function AuthScreen({ language }: { language: Language }) {
 
     setLoading(true);
     try {
-      if (mode === 'login') {
-        await signInWithEmail(email.trim(), password);
-      } else {
-        await signUpWithEmail(email.trim(), password);
-        Alert.alert(t.completeSignup, t.signupPrompt);
-      }
+      await signInWithEmail(email.trim(), password);
     } catch (error) {
       console.error('auth failed', error);
       Alert.alert(t.authError, t.unknownError);
@@ -3083,7 +3060,7 @@ function AuthScreen({ language }: { language: Language }) {
             DAYDROP
           </Text>
           <Text allowFontScaling={false} style={styles.authTitle}>
-            {mode === 'login' ? t.login : t.signup}
+            {t.login}
           </Text>
           <TextInput autoCapitalize="none" editable={!isSubmitting} keyboardType="email-address" onChangeText={setEmail} placeholder="email@example.com" style={styles.input} value={email} />
           <TextInput editable={!isSubmitting} onChangeText={setPassword} placeholder={t.password} secureTextEntry style={styles.input} value={password} />
@@ -3092,7 +3069,7 @@ function AuthScreen({ language }: { language: Language }) {
               <ActivityIndicator color="#FFFFFF" />
             ) : (
               <Text allowFontScaling={false} style={styles.primaryButtonText}>
-                {mode === 'login' ? t.login : t.signup}
+                {t.login}
               </Text>
             )}
           </Pressable>
@@ -3130,9 +3107,9 @@ function AuthScreen({ language }: { language: Language }) {
               </Pressable>
             ) : null}
           </View>
-          <Pressable disabled={isSubmitting} onPress={() => setMode(mode === 'login' ? 'signup' : 'login')}>
+          <Pressable disabled={isSubmitting} onPress={() => router.push({ pathname: '/signup', params: { language } })}>
             <Text allowFontScaling={false} style={styles.secondaryAction}>
-              {mode === 'login' ? (language === 'ko' ? '계정 만들기' : 'Create account') : language === 'ko' ? '이미 계정이 있어요' : 'I already have an account'}
+              {language === 'ko' ? '계정 만들기' : 'Create account'}
             </Text>
           </Pressable>
         </View>
@@ -3748,6 +3725,16 @@ function formatDate(value: string, language: Language) {
     day: 'numeric',
     year: 'numeric',
   }).format(date);
+}
+
+function formatStoryDate(value: string) {
+  const [year, month, day] = value.split('-');
+  if (year && month && day) {
+    return `${year}.${month.padStart(2, '0')}.${day.padStart(2, '0')}`;
+  }
+
+  const date = new Date(`${value}T00:00:00`);
+  return `${date.getFullYear()}.${String(date.getMonth() + 1).padStart(2, '0')}.${String(date.getDate()).padStart(2, '0')}`;
 }
 
 function formatLocationValue(city: string | null | undefined, country: string | null | undefined, language: Language) {
@@ -4768,122 +4755,53 @@ const styles = StyleSheet.create({
   },
   storyCaptureCanvas: {
     alignItems: 'center',
-    backgroundColor: '#F5EFE6',
+    backgroundColor: '#F7F6F2',
     justifyContent: 'flex-start',
     left: -10000,
     overflow: 'hidden',
     position: 'absolute',
     top: -10000,
   },
-  storyTopBar: {
-    height: 80,
-    width: STORY_TEMPLATE_BASE_WIDTH,
-  },
-  storyProgressTrack: {
-    backgroundColor: 'rgba(255, 255, 255, 0.56)',
-    borderRadius: 2,
-    height: 2,
-    left: 12,
-    overflow: 'hidden',
-    position: 'absolute',
-    top: 10,
-    width: STORY_TEMPLATE_BASE_WIDTH - 24,
-  },
-  storyProgressFill: {
-    backgroundColor: '#FFFFFF',
-    height: 2,
-    width: '44%',
-  },
-  storyHeaderRow: {
-    alignItems: 'center',
-    flexDirection: 'row',
-    height: 40,
-    left: 11,
-    position: 'absolute',
-    top: 23,
-    width: STORY_TEMPLATE_BASE_WIDTH - 22,
-  },
-  storyAvatarOuter: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.86)',
-    borderRadius: 18,
-    height: 36,
-    justifyContent: 'center',
-    marginRight: 8,
-    width: 36,
-  },
-  storyAvatarInner: {
-    alignItems: 'center',
-    backgroundColor: '#E3E3E3',
-    borderColor: '#FFFFFF',
-    borderRadius: 15,
-    borderWidth: 1,
-    height: 30,
-    justifyContent: 'flex-end',
-    overflow: 'hidden',
-    width: 30,
-  },
-  storyAvatarHead: {
-    backgroundColor: '#9F9F9F',
-    borderRadius: 8,
-    height: 15,
-    marginBottom: -1,
-    width: 15,
-  },
-  storyAvatarBody: {
-    backgroundColor: '#9F9F9F',
-    borderRadius: 14,
-    height: 15,
-    marginBottom: -5,
-    width: 28,
-  },
-  storyHeaderBrand: {
-    color: '#050505',
-    fontSize: 14,
-    fontWeight: '900',
-    lineHeight: 18,
-    marginRight: 14,
-  },
-  storyHeaderTime: {
-    color: '#9C9790',
-    fontSize: 13,
-    fontWeight: '800',
-    lineHeight: 18,
-  },
-  storyHeaderClose: {
-    marginLeft: 'auto',
-  },
   storyEyebrow: {
     color: '#979189',
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '800',
-    lineHeight: 16,
+    lineHeight: 14,
     marginBottom: 12,
-    marginTop: 2,
+    marginTop: 84,
     textAlign: 'center',
   },
   storyMission: {
     color: '#050505',
-    fontSize: 25,
+    fontSize: 21,
     fontWeight: '900',
-    lineHeight: 31,
+    lineHeight: 28,
     marginBottom: 14,
     textAlign: 'center',
-    width: 300,
+    width: 308,
+  },
+  storyPhotoShadow: {
+    backgroundColor: '#F7F6F2',
+    borderRadius: 8,
+    elevation: 2,
+    marginBottom: 20,
+    shadowColor: '#000000',
+    shadowOffset: { height: 3, width: 0 },
+    shadowOpacity: 0.1,
+    shadowRadius: 7,
   },
   storyPhotoRow: {
     alignItems: 'center',
     borderRadius: 8,
     flexDirection: 'row',
     justifyContent: 'center',
-    marginBottom: 14,
     overflow: 'hidden',
   },
   storyNameRow: {
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 17,
+    marginBottom: 18,
   },
   storyPersonBlock: {
     alignItems: 'center',
@@ -4891,46 +4809,47 @@ const styles = StyleSheet.create({
   },
   storyName: {
     color: '#111111',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '900',
-    lineHeight: 18,
+    lineHeight: 16,
     textAlign: 'center',
     width: '100%',
   },
   storyLocation: {
     color: '#928E87',
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '800',
-    lineHeight: 16,
-    marginTop: 3,
+    lineHeight: 14,
+    marginTop: 2,
     textAlign: 'center',
     width: '100%',
   },
   storyOrnament: {
     color: '#AAA59E',
+    display: 'none',
     flex: 1,
-    fontSize: 17,
+    fontSize: 14,
     fontWeight: '500',
-    lineHeight: 20,
-    marginTop: 3,
+    lineHeight: 18,
+    marginTop: 2,
     textAlign: 'center',
   },
   storyDate: {
     color: '#8F8A83',
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: '800',
-    lineHeight: 20,
-    marginBottom: 19,
+    lineHeight: 18,
+    marginBottom: 20,
     textAlign: 'center',
     width: STORY_TEMPLATE_PHOTO_WIDTH,
   },
   storyBrand: {
     color: '#050505',
-    fontSize: 18,
+    fontSize: 15,
     fontWeight: '900',
-    letterSpacing: 8,
-    lineHeight: 24,
-    paddingLeft: 8,
+    letterSpacing: 6,
+    lineHeight: 20,
+    paddingLeft: 6,
     textAlign: 'center',
   },
   detailHeader: {
