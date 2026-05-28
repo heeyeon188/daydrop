@@ -14,8 +14,10 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Daydrop uses the camera so you can take and share your daily photo.",
         "NSPhotoLibraryUsageDescription": "Daydrop uses your photo library so you can choose a daily photo to share.",
-        "NSPhotoLibraryAddUsageDescription": "Daydrop saves photos only when you choose to save them."
-      }
+        "NSPhotoLibraryAddUsageDescription": "Daydrop saves photos only when you choose to save them.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.heeyeonkim112.daydrop"
     },
     "android": {
       "adaptiveIcon": {
@@ -25,7 +27,14 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_MEDIA_IMAGES"
+      ]
     },
     "web": {
       "output": "static",
