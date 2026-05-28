@@ -3613,11 +3613,11 @@ function CoupleConnectScreen({
       onClose?.();
     } catch (error) {
       console.error('join invite failed', error);
-      Alert.alert(t.joinError, t.unknownError);
+      Alert.alert(t.joinError, getJoinInviteErrorMessage(error, t));
     } finally {
       setLoading(false);
     }
-  }, [code, onClose, onConnected, t.enterInvite, t.inviteCode, t.joinError, t.unknownError]);
+  }, [code, onClose, onConnected, t]);
 
   React.useEffect(() => {
     const nextCode = normalizeInviteCode(initialInviteCode);
@@ -3756,6 +3756,25 @@ function getConnectTitle(partnerType: PartnerType | null, language: Language) {
 
 function normalizeInviteCode(value: unknown) {
   return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+function getJoinInviteErrorMessage(error: unknown, t: ReturnType<typeof getTranslations>) {
+  let message = '';
+  if (error instanceof Error || typeof error === 'string') {
+    message = error instanceof Error ? error.message : error;
+  } else if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {
+    message = error.message;
+  }
+
+  if (message.includes('already_connected_partner')) {
+    return t.alreadyConnectedPartner;
+  }
+
+  if (message.includes('self_invite_code')) {
+    return t.selfInviteCode;
+  }
+
+  return t.unknownError;
 }
 
 function getInviteCodeFromURL(url: string | null) {

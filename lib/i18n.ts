@@ -3,6 +3,7 @@
 type TranslationKey =
   | 'allDrops'
   | 'album'
+  | 'alreadyConnectedPartner'
   | 'authError'
   | 'beforePartner'
   | 'beforePartnerBody'
@@ -114,6 +115,7 @@ type TranslationKey =
   | 'share'
   | 'shareDropBody'
   | 'shareToInstagramStory'
+  | 'selfInviteCode'
   | 'todayDrop'
   | 'todayOpen'
   | 'retakePhoto'
@@ -128,6 +130,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
   ko: {
     allDrops: '전체 Drops',
     album: '앨범에서 선택',
+    alreadyConnectedPartner: '이미 연결된 파트너예요.',
     authError: '인증 오류',
     beforePartner: '파트너 연결 전',
     beforePartnerBody: '파트너를 연결하면 함께 볼 수 있어요.',
@@ -239,6 +242,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     share: '공유하기',
     shareDropBody: '오늘의 드롭을 공유하거나 사진을 크게 볼 수 있어요.',
     shareToInstagramStory: '공유하기',
+    selfInviteCode: '자기 자신의 초대코드는 사용할 수 없어요.',
     todayDrop: "Today's Drop",
     todayOpen: '오늘의 우리가 열렸어요.\n서로의 하루를 함께 볼 수 있어요.',
     retakePhoto: '삭제 후 다시 찍기',
@@ -252,6 +256,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
   en: {
     allDrops: 'All Drops',
     album: 'Choose from album',
+    alreadyConnectedPartner: 'You are already connected with this partner.',
     authError: 'Auth error',
     beforePartner: 'Before partner',
     beforePartnerBody: 'Connect a partner to view together.',
@@ -363,6 +368,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     share: 'Share',
     shareDropBody: 'Share today\'s drop or view the photos larger.',
     shareToInstagramStory: 'Share',
+    selfInviteCode: 'You cannot use your own invite code.',
     todayDrop: "Today's Drop",
     todayOpen: 'Today is open.\nYou can see each other\'s day now.',
     retakePhoto: 'Delete and retake',
