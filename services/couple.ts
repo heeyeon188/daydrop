@@ -15,6 +15,45 @@ export type MyCoupleOption = {
   members: CoupleMember[];
 };
 
+export async function getLatestDisconnectedCouple(): Promise<Couple | null> {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return null;
+  }
+
+  const { data: myMembers, error: memberError } = await supabase
+    .from('couple_members')
+    .select('couple_id')
+    .eq('user_id', user.id);
+
+  if (memberError) {
+    throw memberError;
+  }
+
+  const coupleIds = (myMembers ?? []).map((member) => member.couple_id);
+  if (!coupleIds.length) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from('couples')
+    .select('*')
+    .in('id', coupleIds)
+    .eq('status', 'disconnected')
+    .order('disconnected_at', { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return (data as Couple | null) ?? null;
+}
+
 export async function getMyCouple(): Promise<MyCouple | null> {
   const {
     data: { user },
@@ -64,7 +103,7 @@ export async function getMyCouple(): Promise<MyCouple | null> {
   const availableCouples = (myMembers ?? [])
     .map((member) => {
       const couple = (couples ?? []).find((nextCouple) => nextCouple.id === member.couple_id);
-      if (!couple) {
+      if (!couple || !['active', 'pending'].includes(couple.status)) {
         return null;
       }
       return {
@@ -104,6 +143,18 @@ export async function selectCouple(coupleId: string) {
   if (error) {
     throw error;
   }
+}
+
+export async function disconnectPartnerConnection(coupleId: string) {
+  const { data, error } = await supabase.rpc('disconnect_partner_connection', {
+    p_couple_id: coupleId,
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  return data as { disconnected: boolean; couple_id: string };
 }
 
 export async function createCoupleInvite(partnerType: PartnerType) {

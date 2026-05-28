@@ -46,7 +46,7 @@ import { useSession } from '@/hooks/useSession';
 import { useTodayDrop } from '@/hooks/useTodayDrop';
 import { deleteAccount } from '@/services/account';
 import { signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut } from '@/services/auth';
-import { createCoupleInvite, joinCoupleByInviteCode, selectCouple, type MyCouple, type MyCoupleOption } from '@/services/couple';
+import { createCoupleInvite, disconnectPartnerConnection, joinCoupleByInviteCode, selectCouple, type MyCouple, type MyCoupleOption } from '@/services/couple';
 import { deleteMyTodayDropPhoto, submitDropPhoto } from '@/services/drops';
 import {
   getNotificationPreferences,
@@ -58,7 +58,7 @@ import {
 } from '@/services/notifications';
 import { completeProfile, updatePreferredLanguage, type ProfileInput } from '@/services/profile';
 import { normalizeCameraPhoto, type CameraFacing, type DaydropPhotoAsset } from '@/services/storage';
-import type { CoupleMember, DropState, DropSubmission, PartnerType, Profile, RecentDrop, TodayDropPayload } from '@/types/daydrop';
+import type { Couple, CoupleMember, DropState, DropSubmission, PartnerType, Profile, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
 const EMPTY_MEMBERS: CoupleMember[] = [];
 const PERMISSION_INTRO_STORAGE_KEY = 'daydrop.hasSeenPermissionIntro';
@@ -223,6 +223,7 @@ export default function MissionScreen() {
       language={language}
       myCouple={myCouple.couple}
       myUserId={user.id}
+      latestDisconnectedCouple={myCouple.latestDisconnectedCouple}
       onCoupleChanged={myCouple.refetch}
       onPendingInviteCodeHandled={() => setPendingInviteCode(null)}
       onLanguageChanged={profileState.setProfile}
@@ -239,6 +240,7 @@ export default function MissionScreen() {
 
 function MissionContent({
   language,
+  latestDisconnectedCouple,
   myCouple,
   myUserId,
   onCoupleChanged,
@@ -250,6 +252,7 @@ function MissionContent({
   profile,
 }: {
   language: Language;
+  latestDisconnectedCouple: Couple | null;
   myCouple: MyCouple | null;
   myUserId: string;
   onCoupleChanged: () => Promise<void>;
@@ -274,6 +277,7 @@ function MissionContent({
   const [shareSheetVisible, setShareSheetVisible] = React.useState(false);
   const [settingsVisible, setSettingsVisible] = React.useState(false);
   const [storedPendingInviteCode, setStoredPendingInviteCode] = React.useState<string | null>(null);
+  const [partnerDisconnectedNoticeVisible, setPartnerDisconnectedNoticeVisible] = React.useState(false);
   const activePendingInviteCode = pendingInviteCode ?? storedPendingInviteCode;
   const activeMembers = today?.members ?? myCouple?.members ?? EMPTY_MEMBERS;
   const members = React.useMemo(() => splitMembers(activeMembers, myUserId), [activeMembers, myUserId]);
@@ -300,6 +304,7 @@ function MissionContent({
     };
   }, [language, members.me, members.partner, myUserId, state, t.cityFallbackMe, t.cityFallbackPartner, t.me, t.partner, today]);
   const hasPartner = Boolean(today?.couple.status === 'active' && members.partner);
+  const shouldShowDisconnectedNotice = !hasPartner && (partnerDisconnectedNoticeVisible || Boolean(latestDisconnectedCouple));
   const isTodayUnlocked = hasPartner && state === 'both';
   const mainButtonDisabled = hasPartner ? (state === 'meOnly' || uploading || deletingPhoto) : uploading || deletingPhoto;
   const stateCopy = React.useMemo(() => getStateCopy(state, t, hasPartner), [hasPartner, state, t]);
@@ -496,6 +501,17 @@ function MissionContent({
     }
   };
 
+  const handleDisconnectPartner = async (coupleId: string) => {
+    await disconnectPartnerConnection(coupleId);
+    setFullImage(null);
+    setDropDetail(null);
+    setAllDropsVisible(false);
+    setShareSheetVisible(false);
+    setPartnerDisconnectedNoticeVisible(true);
+    await onCoupleChanged();
+    await refetch(true);
+  };
+
   if (loading && !today) {
     return <CenteredState text={t.loadingMission} />;
   }
@@ -516,6 +532,7 @@ function MissionContent({
         </View>
 
         {error ? <InlineMessage text={error} /> : null}
+        {shouldShowDisconnectedNotice ? <InlineMessage text={t.disconnectPartnerNotice} /> : null}
 
         {today ? (
           <>
@@ -587,7 +604,7 @@ function MissionContent({
 
         <View style={styles.recentList}>
           {recentDrops.length === 0 ? (
-            <InlineMessage text={t.noRecentDrops} />
+            <InlineMessage text={shouldShowDisconnectedNotice ? t.disconnectedHistoryHidden : t.noRecentDrops} />
           ) : (
             recentDrops.map((drop) => (
               <RecentDropRow
@@ -634,7 +651,9 @@ function MissionContent({
         profile={profile}
         t={t}
         visible={settingsVisible}
+        myCouple={myCouple}
         onClose={() => setSettingsVisible(false)}
+        onDisconnectPartner={handleDisconnectPartner}
         onLanguageChanged={onLanguageChanged}
         onLogout={onLogout}
         onProfileSaved={onProfileSaved}
@@ -2043,7 +2062,9 @@ function PermissionIntroModal({ language, onClose, visible }: { language: Langua
 
 function SettingsSheet({
   language,
+  myCouple,
   onClose,
+  onDisconnectPartner,
   onLanguageChanged,
   onLogout,
   onProfileSaved,
@@ -2052,7 +2073,9 @@ function SettingsSheet({
   visible,
 }: {
   language: Language;
+  myCouple: MyCouple | null;
   onClose: () => void;
+  onDisconnectPartner: (coupleId: string) => Promise<void>;
   onLanguageChanged: (profile: Profile) => void;
   onLogout: () => Promise<void>;
   onProfileSaved: (profile: Profile) => Promise<void>;
@@ -2065,6 +2088,7 @@ function SettingsSheet({
   >('menu');
   const [deleteConfirmText, setDeleteConfirmText] = React.useState('');
   const [deletingAccount, setDeletingAccount] = React.useState(false);
+  const [disconnectingPartner, setDisconnectingPartner] = React.useState(false);
   const [savingLanguage, setSavingLanguage] = React.useState(false);
   const [notificationPermission, setNotificationPermission] = React.useState<'checking' | 'granted' | 'denied' | 'undetermined'>(
     'checking'
@@ -2207,6 +2231,44 @@ function SettingsSheet({
     }
   };
 
+  const handleDisconnectPartner = () => {
+    const coupleId = myCouple?.couple.status === 'active' ? myCouple.couple.id : null;
+    if (disconnectingPartner) {
+      return;
+    }
+
+    if (!coupleId) {
+      Alert.alert(t.disconnectPartner, language === 'ko' ? '현재 연결된 파트너가 없어요.' : 'No partner is currently connected.');
+      return;
+    }
+
+    Alert.alert(
+      t.disconnectPartnerTitle,
+      language === 'ko'
+        ? '연결을 해제하면 더 이상 서로의 새 사진과 메시지를 공유할 수 없어요.\n다시 연결하려면 새로운 초대코드가 필요해요.'
+        : 'After disconnecting, you will no longer share new photos or messages.\nYou will need a new invite code to reconnect.',
+      [
+        { text: t.cancel, style: 'cancel' },
+        {
+          text: t.disconnectPartnerConfirm,
+          style: 'destructive',
+          onPress: async () => {
+            setDisconnectingPartner(true);
+            try {
+              await onDisconnectPartner(coupleId);
+              Alert.alert(t.disconnectPartnerSuccess);
+            } catch (error) {
+              console.error('disconnect partner failed', error);
+              Alert.alert(t.disconnectPartnerError, t.unknownError);
+            } finally {
+              setDisconnectingPartner(false);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const handleRequestNotificationPermission = async () => {
     if (requestingNotificationPermission) {
       return;
@@ -2337,6 +2399,39 @@ function SettingsSheet({
       console.warn('open mail app failed', error);
       Alert.alert(
         language === 'ko' ? '문의 이메일' : 'Support Email',
+        language === 'ko'
+          ? `메일 앱을 열 수 없어요.\n${SUPPORT_EMAIL}`
+          : `Could not open the mail app.\n${SUPPORT_EMAIL}`
+      );
+    }
+  };
+
+  const handleOpenReportEmail = async () => {
+    const subject = '[Daydrop Report] 문제 신고';
+    const body = [
+      '신고 유형:',
+      '',
+      '* 불쾌한 사진',
+      '* 메시지 문제',
+      '* 파트너 연결 문제',
+      '* 기타',
+      '',
+      '문제 내용:',
+      '발생 시간:',
+      '상대 닉네임 또는 계정 정보:',
+    ].join('\n');
+
+    const url = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+    try {
+      const canOpen = await Linking.canOpenURL(url);
+      if (!canOpen) {
+        throw new Error('mailto not supported');
+      }
+      await Linking.openURL(url);
+    } catch (error) {
+      console.warn('open report mail app failed', error);
+      Alert.alert(
+        language === 'ko' ? '문제 신고' : 'Report an Issue',
         language === 'ko'
           ? `메일 앱을 열 수 없어요.\n${SUPPORT_EMAIL}`
           : `Could not open the mail app.\n${SUPPORT_EMAIL}`
@@ -2630,6 +2725,24 @@ function SettingsSheet({
                 <SettingsRow icon="shield" title={t.privacyPolicy} onPress={openPrivacyPolicy} showDivider={false} />
               </SettingsSection>
 
+              <SettingsSection title={language === 'ko' ? 'Help & Safety' : 'Help & Safety'}>
+                <SettingsRow
+                  danger
+                  icon="user-minus"
+                  title={t.disconnectPartner}
+                  subtitle={t.disconnectPartnerBody}
+                  rightValue={disconnectingPartner ? (language === 'ko' ? '처리 중' : 'Working') : undefined}
+                  onPress={handleDisconnectPartner}
+                />
+                <SettingsRow
+                  icon="flag"
+                  title={t.reportIssue}
+                  subtitle={t.reportIssueBody}
+                  onPress={handleOpenReportEmail}
+                  showDivider={false}
+                />
+              </SettingsSection>
+
               <SettingsSection title="Danger Zone">
                 <SettingsRow danger icon="user-x" title={t.deleteAccount} onPress={() => setMode('deleteIntro')} showDivider={false} />
               </SettingsSection>
@@ -2687,7 +2800,7 @@ function SettingsRow({
           {title}
         </Text>
         {subtitle ? (
-          <Text allowFontScaling={false} numberOfLines={1} style={styles.settingsRowSubtitle}>
+          <Text allowFontScaling={false} numberOfLines={2} style={styles.settingsRowSubtitle}>
             {subtitle}
           </Text>
         ) : null}

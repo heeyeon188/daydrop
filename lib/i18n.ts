@@ -38,6 +38,14 @@ type TranslationKey =
   | 'deleteAccountFinalBody'
   | 'deleteAccountFinalPlaceholder'
   | 'deleteAccountTitle'
+  | 'disconnectPartner'
+  | 'disconnectPartnerBody'
+  | 'disconnectPartnerConfirm'
+  | 'disconnectPartnerError'
+  | 'disconnectPartnerNotice'
+  | 'disconnectPartnerSuccess'
+  | 'disconnectPartnerTitle'
+  | 'disconnectedHistoryHidden'
   | 'dropLocked'
   | 'editProfile'
   | 'email'
@@ -90,6 +98,8 @@ type TranslationKey =
   | 'profileSaveError'
   | 'profileSaved'
   | 'recentDrops'
+  | 'reportIssue'
+  | 'reportIssueBody'
   | 'save'
   | 'sendDone'
   | 'sendMine'
@@ -153,6 +163,14 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     deleteAccountFinalBody: '마지막 확인을 위해 DELETE 또는 삭제를 입력해주세요.',
     deleteAccountFinalPlaceholder: 'DELETE 또는 삭제',
     deleteAccountTitle: '계정을 삭제할까요?',
+    disconnectPartner: '파트너 연결 해제',
+    disconnectPartnerBody: '파트너와의 연결을 끊고, 새 사진과 메시지 공유를 중단합니다.',
+    disconnectPartnerConfirm: '연결 해제',
+    disconnectPartnerError: '파트너 연결을 해제하지 못했어요.',
+    disconnectPartnerNotice: '파트너 연결이 해제되었어요.\n새로운 초대코드로 다시 연결할 수 있어요.',
+    disconnectPartnerSuccess: '연결이 끊겼습니다.',
+    disconnectPartnerTitle: '파트너 연결을 해제할까요?',
+    disconnectedHistoryHidden: '연결이 해제되어 이전 공유 기록을 볼 수 없어요.',
     dropLocked: '잠긴 Drop',
     editProfile: '프로필 수정',
     email: '이메일',
@@ -205,6 +223,8 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     profileSaveError: '프로필 저장 실패',
     profileSaved: '프로필이 저장되었어요.',
     recentDrops: 'Recent Drops',
+    reportIssue: '문제 신고',
+    reportIssueBody: '불쾌한 사진, 메시지, 파트너 연결 문제를 신고하세요.',
     save: '저장',
     searchCountry: '나라 검색',
     sendDone: '보내기 완료',
@@ -267,6 +287,14 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     deleteAccountFinalBody: 'Type DELETE or 삭제 to confirm.',
     deleteAccountFinalPlaceholder: 'DELETE or 삭제',
     deleteAccountTitle: 'Delete your account?',
+    disconnectPartner: 'Disconnect Partner',
+    disconnectPartnerBody: 'Disconnect from your partner and stop sharing new photos and messages.',
+    disconnectPartnerConfirm: 'Disconnect',
+    disconnectPartnerError: 'Could not disconnect your partner.',
+    disconnectPartnerNotice: 'Your partner connection was disconnected.\nYou can reconnect with a new invite code.',
+    disconnectPartnerSuccess: 'Connection disconnected.',
+    disconnectPartnerTitle: 'Disconnect partner?',
+    disconnectedHistoryHidden: 'Previous shared history is hidden because the connection was disconnected.',
     dropLocked: 'Locked Drop',
     editProfile: 'Edit Profile',
     email: 'Email',
@@ -319,6 +347,8 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     profileSaveError: 'Could not save profile',
     profileSaved: 'Profile saved.',
     recentDrops: 'Recent Drops',
+    reportIssue: 'Report an Issue',
+    reportIssueBody: 'Report uncomfortable photos, message issues, or partner connection problems.',
     save: 'Save',
     searchCountry: 'Search country',
     sendDone: 'Sent',

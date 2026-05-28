@@ -23,11 +23,13 @@ export type Couple = {
   id: string;
   invite_code: string;
   created_by: string | null;
-  status: 'pending' | 'active';
+  status: 'pending' | 'active' | 'disconnected';
   partner_type: PartnerType | null;
   relationship_start_date: string | null;
   created_at: string;
   connected_at: string | null;
+  disconnected_at?: string | null;
+  disconnected_by?: string | null;
 };
 
 export type CoupleMember = {
