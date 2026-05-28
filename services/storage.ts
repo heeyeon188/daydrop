@@ -9,6 +9,9 @@ import { supabase } from '@/lib/supabase';
 const BUCKET = 'daydrop-photos';
 const UPLOAD_MAX_LONG_EDGE = 1440;
 const UPLOAD_JPEG_QUALITY = 0.82;
+const SIGNED_URL_TTL_SECONDS = 60 * 60;
+const SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+const signedUrlCache = new Map<string, { expiresAt: number; url: string }>();
 export type CameraFacing = 'front' | 'back';
 type PickedImageSource = 'library' | CameraFacing;
 export type DaydropPhotoAsset = {
@@ -373,17 +376,29 @@ async function getLocalFileSize(uri: string) {
 }
 
 export async function createPhotoSignedUrl(storagePath: string) {
-  const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(storagePath, 60 * 60);
+  const cached = signedUrlCache.get(storagePath);
+  if (cached && cached.expiresAt - SIGNED_URL_REFRESH_BUFFER_MS > Date.now()) {
+    return cached.url;
+  }
+
+  const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
   if (error) {
     throw error;
   }
+
+  signedUrlCache.set(storagePath, {
+    expiresAt: Date.now() + SIGNED_URL_TTL_SECONDS * 1000,
+    url: data.signedUrl,
+  });
+
   return data.signedUrl;
 }
 
 async function createUploadImageUrl(storagePath: string) {
-  const { data: signedData } = await supabase.storage.from(BUCKET).createSignedUrl(storagePath, 60 * 60 * 24);
-  if (signedData?.signedUrl) {
-    return signedData.signedUrl;
+  try {
+    return await createPhotoSignedUrl(storagePath);
+  } catch {
+    // Fall through to a public URL for compatibility with older bucket settings.
   }
 
   return supabase.storage.from(BUCKET).getPublicUrl(storagePath).data.publicUrl;

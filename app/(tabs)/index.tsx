@@ -6,6 +6,7 @@ import { CameraView, type CameraType, useCameraPermissions } from 'expo-camera';
 import * as Clipboard from 'expo-clipboard';
 import * as Device from 'expo-device';
 import * as FileSystem from 'expo-file-system/legacy';
+import { Image as ExpoImage } from 'expo-image';
 import * as ExpoLinking from 'expo-linking';
 import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
@@ -16,7 +17,7 @@ import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanima
 import {
   ActivityIndicator,
   Alert,
-  Image,
+  Image as RNImage,
   KeyboardAvoidingView,
   LayoutChangeEvent,
   Linking,
@@ -71,6 +72,8 @@ const STORY_TEMPLATE_PHOTO_HEIGHT = 316;
 const RECENT_THUMB_GROUP_WIDTH = 138;
 const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
 const RECENT_THUMB_DEFAULT_HEIGHT = 82;
+const HOME_RECENT_DROPS_LIMIT = 5;
+const LOCKED_PHOTO_BLUR_RADIUS = 32;
 const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
   dailyQuestion: true,
   partnerConnected: true,
@@ -108,7 +111,7 @@ type ShareStoryLayout = ShareStoryData & {
   rightPhoto: ImageSize;
   width: number;
 };
-type SafeImageResizeMode = React.ComponentProps<typeof Image>['resizeMode'];
+type SafeImageResizeMode = React.ComponentProps<typeof RNImage>['resizeMode'];
 
 const ULTRA_WIDE_BACK_LENS_PATTERNS = ['ultra', '0.5', '초광각'];
 const NON_DEFAULT_BACK_LENS_PATTERNS = [
@@ -318,6 +321,7 @@ function MissionContent({
   );
   const partnerCount = partnerOptions.length;
   const canAddPartner = partnerCount < 4;
+  const visibleRecentDrops = React.useMemo(() => recentDrops.slice(0, HOME_RECENT_DROPS_LIMIT), [recentDrops]);
 
   React.useEffect(() => {
     let mounted = true;
@@ -606,7 +610,7 @@ function MissionContent({
           {recentDrops.length === 0 ? (
             <InlineMessage text={shouldShowDisconnectedNotice ? t.disconnectedHistoryHidden : t.noRecentDrops} />
           ) : (
-            recentDrops.map((drop) => (
+            visibleRecentDrops.map((drop) => (
               <RecentDropRow
                 key={drop.id}
                 drop={drop}
@@ -930,7 +934,7 @@ function DaydropCameraModal({
           <>
             <View style={styles.cameraPreviewShell}>
               {captured ? (
-                <Image resizeMode="cover" source={{ uri: captured.uri }} style={styles.cameraPreview} />
+                <RNImage resizeMode="cover" source={{ uri: captured.uri }} style={styles.cameraPreview} />
               ) : (
                 <CameraView
                   key={`daydrop-camera-${facing}`}
@@ -1360,7 +1364,7 @@ function EditablePhotoSlot({
 function LockedPhotoSlot({ image, label, onPress, t }: { image?: string; label: string; onPress: () => void; t: Copy }) {
   return (
     <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius('left')]}>
-      <SafeImage blurRadius={24} image={image} label={label} resizeMode="cover" />
+      <SafeImage blurRadius={LOCKED_PHOTO_BLUR_RADIUS} image={image} label={label} resizeMode="cover" />
       <View pointerEvents="none" style={styles.partnerLockVeil} />
       <View style={[styles.lockContent, styles.partnerLockContent]}>
         <Feather name="lock" size={24} color="#FFFFFF" strokeWidth={2.1} />
@@ -1392,6 +1396,8 @@ function SendSlot({ label, message, onPress, t }: { label: string; message?: str
 
 function SafeImage({ blurRadius = 0, image, label, resizeMode = 'contain' }: { blurRadius?: number; image?: string; label: string; resizeMode?: SafeImageResizeMode }) {
   const [failed, setFailed] = React.useState(false);
+  const locked = blurRadius > 0;
+  const lockedBlurRadius = Math.max(blurRadius, LOCKED_PHOTO_BLUR_RADIUS);
 
   React.useEffect(() => {
     setFailed(false);
@@ -1405,18 +1411,50 @@ function SafeImage({ blurRadius = 0, image, label, resizeMode = 'contain' }: { b
     );
   }
 
+  if (locked) {
+    return (
+      <View style={styles.lockedImageWrap}>
+        <RNImage
+          blurRadius={lockedBlurRadius}
+          resizeMode={resizeMode}
+          source={{ uri: image }}
+          style={styles.slotImage}
+          onError={(event) => {
+            console.warn(`Daydrop image failed to load (${label})`, event.nativeEvent.error);
+            setFailed(true);
+          }}
+        />
+      </View>
+    );
+  }
+
   return (
-    <Image
-      blurRadius={blurRadius}
-      resizeMode={resizeMode}
-      source={{ uri: image }}
+    <ExpoImage
+      cachePolicy="memory-disk"
+      contentFit={toImageContentFit(resizeMode)}
+      priority="high"
+      source={image}
       style={styles.slotImage}
       onError={(event) => {
-        console.warn(`Daydrop image failed to load (${label})`, event.nativeEvent.error);
+        console.warn(`Daydrop image failed to load (${label})`, event.error);
         setFailed(true);
       }}
     />
   );
+}
+
+function toImageContentFit(resizeMode: SafeImageResizeMode): React.ComponentProps<typeof ExpoImage>['contentFit'] {
+  switch (resizeMode) {
+    case 'cover':
+      return 'cover';
+    case 'stretch':
+      return 'fill';
+    case 'center':
+      return 'none';
+    case 'contain':
+    default:
+      return 'contain';
+  }
 }
 
 function RecentDropRow({
@@ -1465,7 +1503,7 @@ function RecentDropRow({
 function RecentThumb({ height = RECENT_THUMB_DEFAULT_HEIGHT, image, locked, side }: { height?: number; image?: string; locked: boolean; side: 'left' | 'right' }) {
   return (
     <View style={[styles.recentThumb, side === 'left' ? styles.recentThumbLeft : styles.recentThumbRight, { height }]}>
-      {image ? <SafeImage blurRadius={locked ? 12 : 0} image={image} label={`recent-${side}`} /> : <View style={styles.recentPlaceholder} />}
+      {image ? <SafeImage blurRadius={locked ? LOCKED_PHOTO_BLUR_RADIUS : 0} image={image} label={`recent-${side}`} /> : <View style={styles.recentPlaceholder} />}
       {locked ? (
         <>
           <View style={styles.recentLock}>
@@ -1498,7 +1536,7 @@ function FullImageModal({
         <Pressable hitSlop={12} onPress={onClose} style={[styles.closeButton, { top: Math.max(insets.top + 12, 22) }]}>
           <Feather name="x" size={28} color="#FFFFFF" />
         </Pressable>
-        {image?.image ? <Image resizeMode="contain" source={{ uri: image.image }} style={styles.fullImage} /> : null}
+        {image?.image ? <ExpoImage cachePolicy="memory-disk" contentFit="contain" source={image.image} style={styles.fullImage} /> : null}
         <View style={[styles.fullCaption, { bottom: image?.canDelete ? Math.max(insets.bottom + 88, 96) : Math.max(insets.bottom + 26, 42) }]}>
           <Text allowFontScaling={false} style={styles.fullLabel}>
             {image?.label}
@@ -1866,7 +1904,7 @@ function TodayShareSheet({
               </Text>
               <View style={[styles.storyPhotoShadow, { height: storyLayout.photoHeight, width: storyLayout.photoWidth }]}>
                 <View style={[styles.storyPhotoRow, { height: storyLayout.photoHeight, width: storyLayout.photoWidth }]}>
-                  <Image
+                  <RNImage
                     key={`story-left-${storyLayout.key}`}
                     onError={handleStoryImageError}
                     onLoad={() => handleStoryImageLoad('left')}
@@ -1877,7 +1915,7 @@ function TodayShareSheet({
                       width: storyLayout.leftPhoto.width,
                     }}
                   />
-                  <Image
+                  <RNImage
                     key={`story-right-${storyLayout.key}`}
                     onError={handleStoryImageError}
                     onLoad={() => handleStoryImageLoad('right')}
@@ -1993,13 +2031,13 @@ function PhotoPreviewModal({ layout, onClose, visible }: { layout: PhotoPreviewL
         {layout ? (
           <GestureDetector gesture={previewGesture}>
             <Animated.View style={[styles.photoPreviewRow, { height: layout.height, width: layout.width }, previewAnimatedStyle]}>
-              <Image
+              <RNImage
                 key={`preview-left-${layout.key}`}
                 resizeMode="contain"
                 source={{ uri: layout.leftUri }}
                 style={{ height: layout.left.height, width: layout.left.width }}
               />
-              <Image
+              <RNImage
                 key={`preview-right-${layout.key}`}
                 resizeMode="contain"
                 source={{ uri: layout.rightUri }}
@@ -2016,7 +2054,7 @@ function PhotoPreviewModal({ layout, onClose, visible }: { layout: PhotoPreviewL
 function DetailPhoto({ image, label, locked, side }: { image?: string; label: string; locked: boolean; side: 'left' | 'right' }) {
   return (
     <View style={[styles.detailPhoto, !image && styles.emptyPhotoSlot, !image && styles.detailEmptyPhotoSlot, sideRadius(side)]}>
-      {image ? <SafeImage blurRadius={locked ? 16 : 0} image={image} label={`detail-${label}`} resizeMode="cover" /> : <View style={styles.detailPlaceholder} />}
+      {image ? <SafeImage blurRadius={locked ? LOCKED_PHOTO_BLUR_RADIUS : 0} image={image} label={`detail-${label}`} resizeMode="cover" /> : <View style={styles.detailPlaceholder} />}
       {locked ? (
         <>
           <View style={styles.lockContent}>
@@ -2863,7 +2901,7 @@ function useImageSize(image?: string): ImageSize | null {
       return;
     }
 
-    Image.getSize(
+    RNImage.getSize(
       image,
       (width, height) => {
         if (mounted) {
@@ -2886,7 +2924,7 @@ function useImageSize(image?: string): ImageSize | null {
 
 function getRemoteImageSize(image: string): Promise<ImageSize> {
   return new Promise((resolve, reject) => {
-    Image.getSize(
+    RNImage.getSize(
       image,
       (width, height) => {
         if (width > 0 && height > 0) {
@@ -4330,6 +4368,11 @@ const styles = StyleSheet.create({
   },
   slotImage: {
     height: '100%',
+    width: '100%',
+  },
+  lockedImageWrap: {
+    height: '100%',
+    overflow: 'hidden',
     width: '100%',
   },
   imageFallback: {
