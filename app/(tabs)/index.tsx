@@ -74,6 +74,8 @@ const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
 const RECENT_THUMB_DEFAULT_HEIGHT = 82;
 const HOME_RECENT_DROPS_LIMIT = 5;
 const LOCKED_PHOTO_BLUR_RADIUS = 32;
+const TODAY_DROP_PENDING_TEXT_COLOR = '#666666';
+const TODAY_DROP_PENDING_ICON_COLOR = '#7890AE';
 const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
   dailyQuestion: true,
   partnerConnected: true,
@@ -1296,7 +1298,7 @@ function EmptySlot({
   tone: 'blue' | 'sand';
 }) {
   const toneStyle = tone === 'blue' ? styles.blueSlot : styles.sandSlot;
-  const toneColor = tone === 'blue' ? '#7890AE' : '#9B8D77';
+  const toneColor = tone === 'blue' ? TODAY_DROP_PENDING_ICON_COLOR : '#9B8D77';
 
   return (
     <Pressable disabled={!onPress} onPress={onPress} style={[styles.dropSlot, toneStyle, styles.emptyPhotoSlot, sideRadius(side)]}>
@@ -1315,7 +1317,7 @@ function WaitingSlot({ label, t }: { label: string; t: Copy }) {
   return (
     <View style={[styles.dropSlot, styles.waitingSlot, styles.emptyPhotoSlot, sideRadius('left')]}>
       <View style={styles.waitingContent}>
-        <Feather name="refresh-cw" size={31} color="#858585" strokeWidth={1.65} />
+        <Feather name="refresh-cw" size={31} color={TODAY_DROP_PENDING_ICON_COLOR} strokeWidth={1.65} />
         <Text allowFontScaling={false} style={styles.waitingText}>
           {t.waitingPartner}
         </Text>
@@ -4346,7 +4348,7 @@ const styles = StyleSheet.create({
     transform: [{ translateY: -6 }],
   },
   waitingText: {
-    color: '#353535',
+    color: TODAY_DROP_PENDING_TEXT_COLOR,
     fontSize: 14,
     fontWeight: '500',
     textAlign: 'center',
@@ -4383,7 +4385,7 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   emptyMessage: {
-    color: '#666666',
+    color: TODAY_DROP_PENDING_TEXT_COLOR,
     fontSize: 14,
     fontWeight: '500',
     lineHeight: 20,
