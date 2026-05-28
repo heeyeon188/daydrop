@@ -115,6 +115,9 @@ type ShareStoryLayout = ShareStoryData & {
 };
 type SafeImageResizeMode = React.ComponentProps<typeof RNImage>['resizeMode'];
 
+const imageSizeCache = new Map<string, ImageSize>();
+const imageSizeInFlight = new Map<string, Promise<ImageSize>>();
+
 const ULTRA_WIDE_BACK_LENS_PATTERNS = ['ultra', '0.5', '초광각'];
 const NON_DEFAULT_BACK_LENS_PATTERNS = [
   'tele',
@@ -2893,28 +2896,33 @@ function NotificationToggleRow({
 }
 
 function useImageSize(image?: string): ImageSize | null {
-  const [size, setSize] = React.useState<ImageSize | null>(null);
+  const [size, setSize] = React.useState<ImageSize | null>(() => (image ? imageSizeCache.get(image) ?? null : null));
 
   React.useEffect(() => {
     let mounted = true;
-    setSize(null);
 
     if (!image) {
+      setSize(null);
       return;
     }
 
-    RNImage.getSize(
-      image,
-      (width, height) => {
+    const cachedSize = imageSizeCache.get(image);
+    if (cachedSize) {
+      setSize(cachedSize);
+      return;
+    }
+
+    setSize(null);
+    getCachedRemoteImageSize(image)
+      .then((nextSize) => {
         if (mounted) {
-          setSize({ height, width });
-          console.log('[photo] display image size', { uri: image, width, height });
+          setSize(nextSize);
+          console.log('[photo] display image size', { uri: image, width: nextSize.width, height: nextSize.height });
         }
-      },
-      (error) => {
+      })
+      .catch((error) => {
         console.warn('[photo] display image size lookup failed', { uri: image, error });
-      }
-    );
+      });
 
     return () => {
       mounted = false;
@@ -2925,6 +2933,34 @@ function useImageSize(image?: string): ImageSize | null {
 }
 
 function getRemoteImageSize(image: string): Promise<ImageSize> {
+  return getCachedRemoteImageSize(image);
+}
+
+function getCachedRemoteImageSize(image: string): Promise<ImageSize> {
+  const cachedSize = imageSizeCache.get(image);
+  if (cachedSize) {
+    return Promise.resolve(cachedSize);
+  }
+
+  const inFlightSize = imageSizeInFlight.get(image);
+  if (inFlightSize) {
+    return inFlightSize;
+  }
+
+  const nextSize = loadRemoteImageSize(image)
+    .then((size) => {
+      imageSizeCache.set(image, size);
+      return size;
+    })
+    .finally(() => {
+      imageSizeInFlight.delete(image);
+    });
+
+  imageSizeInFlight.set(image, nextSize);
+  return nextSize;
+}
+
+function loadRemoteImageSize(image: string): Promise<ImageSize> {
   return new Promise((resolve, reject) => {
     RNImage.getSize(
       image,

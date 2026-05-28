@@ -10,7 +10,15 @@ type RefetchResult = {
   today: TodayDropPayload;
 } | null;
 
+type PrefetchImage = {
+  key: string;
+  url: string;
+};
+
 const RECENT_PREFETCH_DROP_LIMIT = 4;
+const REALTIME_REFETCH_DEBOUNCE_MS = 1200;
+const prefetchedImageKeys = new Set<string>();
+const prefetchingImageKeys = new Set<string>();
 
 export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null) {
   const [today, setToday] = React.useState<TodayDropPayload | null>(null);
@@ -18,49 +26,90 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null)
   const [loading, setLoading] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const refetchInFlightRef = React.useRef<Promise<RefetchResult> | null>(null);
+  const realtimeRefetchTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastExplicitRefreshAtRef = React.useRef(0);
 
   const refetch = React.useCallback(
     async (isRefresh = false): Promise<RefetchResult> => {
+      if (isRefresh) {
+        lastExplicitRefreshAtRef.current = Date.now();
+      }
+
+      if (refetchInFlightRef.current) {
+        return refetchInFlightRef.current;
+      }
+
       if (!enabled) {
         setToday(null);
         setRecentDrops([]);
         return null;
       }
 
-      if (isRefresh) {
-        setRefreshing(true);
-      } else {
-        setLoading(true);
-      }
-      setError(null);
+      const nextRefetch = (async () => {
+        if (isRefresh) {
+          setRefreshing(true);
+        } else {
+          setLoading(true);
+        }
+        setError(null);
 
-      try {
-        const nextToday = await getOrCreateTodayDrop();
-        prefetchDropImageUrls(collectTodayImageUrls(nextToday));
-        setToday((current) => (areTodayImageUrlsEqual(current, nextToday) ? current : nextToday));
+        try {
+          const nextToday = await getOrCreateTodayDrop();
+          setToday((current) => (areTodayImageUrlsEqual(current, nextToday) ? current : nextToday));
+          prefetchDropImageUrls(collectTodayImageUrls(nextToday));
 
-        const nextRecentDrops = await getRecentDrops(nextToday.daily_drop.couple_id);
-        prefetchDropImageUrls(collectRecentImageUrls(nextRecentDrops));
-        setRecentDrops((current) => (areRecentImageUrlsEqual(current, nextRecentDrops) ? current : nextRecentDrops));
-        return {
-          recentDrops: nextRecentDrops,
-          today: nextToday,
-        };
-      } catch (nextError) {
-        console.error('load today drop failed', nextError);
-        setError('네트워크 상태를 확인하고 다시 시도해주세요.');
-        return null;
-      } finally {
-        setLoading(false);
-        setRefreshing(false);
-      }
+          const nextRecentDrops = await getRecentDrops(nextToday.daily_drop.couple_id);
+          setRecentDrops((current) => (areRecentImageUrlsEqual(current, nextRecentDrops) ? current : nextRecentDrops));
+          prefetchDropImageUrls(collectRecentImageUrls(nextRecentDrops));
+          return {
+            recentDrops: nextRecentDrops,
+            today: nextToday,
+          };
+        } catch (nextError) {
+          console.error('load today drop failed', nextError);
+          setError('네트워크 상태를 확인하고 다시 시도해주세요.');
+          return null;
+        } finally {
+          setLoading(false);
+          setRefreshing(false);
+          refetchInFlightRef.current = null;
+        }
+      })();
+
+      refetchInFlightRef.current = nextRefetch;
+      return nextRefetch;
     },
     [enabled, selectedCoupleId]
   );
 
+  const scheduleRealtimeRefetch = React.useCallback(() => {
+    if (Date.now() - lastExplicitRefreshAtRef.current < REALTIME_REFETCH_DEBOUNCE_MS) {
+      return;
+    }
+
+    if (realtimeRefetchTimerRef.current) {
+      clearTimeout(realtimeRefetchTimerRef.current);
+    }
+
+    realtimeRefetchTimerRef.current = setTimeout(() => {
+      realtimeRefetchTimerRef.current = null;
+      void refetch(true);
+    }, REALTIME_REFETCH_DEBOUNCE_MS);
+  }, [refetch]);
+
   React.useEffect(() => {
     void refetch();
   }, [refetch]);
+
+  React.useEffect(() => {
+    return () => {
+      if (realtimeRefetchTimerRef.current) {
+        clearTimeout(realtimeRefetchTimerRef.current);
+        realtimeRefetchTimerRef.current = null;
+      }
+    };
+  }, []);
 
   React.useEffect(() => {
     const coupleId = today?.daily_drop.couple_id;
@@ -79,7 +128,7 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null)
           filter: `couple_id=eq.${coupleId}`,
         },
         () => {
-          void refetch(true);
+          scheduleRealtimeRefetch();
         }
       )
       .subscribe();
@@ -87,7 +136,7 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null)
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [today?.daily_drop.couple_id, refetch]);
+  }, [scheduleRealtimeRefetch, today?.daily_drop.couple_id]);
 
   return {
     today,
@@ -99,27 +148,50 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null)
   };
 }
 
-function collectTodayImageUrls(today: TodayDropPayload) {
-  return collectSubmissionImageUrls(today.submissions);
+function collectTodayImageUrls(today: TodayDropPayload): PrefetchImage[] {
+  return collectSubmissionImages(today.submissions);
 }
 
-function collectRecentImageUrls(drops: RecentDrop[]) {
-  return drops.slice(0, RECENT_PREFETCH_DROP_LIMIT).flatMap((drop) => collectSubmissionImageUrls(drop.drop_submissions));
+function collectRecentImageUrls(drops: RecentDrop[]): PrefetchImage[] {
+  return drops.slice(0, RECENT_PREFETCH_DROP_LIMIT).flatMap((drop) => collectSubmissionImages(drop.drop_submissions));
 }
 
-function collectSubmissionImageUrls(submissions: DropSubmission[]) {
-  return submissions.map((submission) => submission.image_url).filter(isNonEmptyString);
+function collectSubmissionImages(submissions: DropSubmission[]): PrefetchImage[] {
+  return submissions.reduce<PrefetchImage[]>((images, submission) => {
+    if (isNonEmptyString(submission.image_url)) {
+      images.push({
+        key: submission.storage_path?.trim() || submission.image_url,
+        url: submission.image_url,
+      });
+    }
+    return images;
+  }, []);
 }
 
-function prefetchDropImageUrls(urls: string[]) {
-  const uniqueUrls = [...new Set(urls)];
-  if (uniqueUrls.length === 0) {
+function prefetchDropImageUrls(images: PrefetchImage[]) {
+  const imageByKey = new Map(images.map((image) => [image.key, image.url]));
+  const nextImages = [...imageByKey.entries()].filter(([key]) => !prefetchedImageKeys.has(key) && !prefetchingImageKeys.has(key));
+  if (nextImages.length === 0) {
     return;
   }
 
-  ExpoImage.prefetch(uniqueUrls, 'memory-disk').catch((error) => {
-    console.warn('[photo] image prefetch failed', error);
-  });
+  nextImages.forEach(([key]) => prefetchingImageKeys.add(key));
+
+  ExpoImage.prefetch(
+    nextImages.map(([, url]) => url),
+    'memory-disk'
+  )
+    .then((prefetched) => {
+      if (prefetched) {
+        nextImages.forEach(([key]) => prefetchedImageKeys.add(key));
+      }
+    })
+    .catch((error) => {
+      console.warn('[photo] image prefetch failed', error);
+    })
+    .finally(() => {
+      nextImages.forEach(([key]) => prefetchingImageKeys.delete(key));
+    });
 }
 
 function areTodayImageUrlsEqual(current: TodayDropPayload | null, next: TodayDropPayload) {
