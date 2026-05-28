@@ -3,6 +3,9 @@ import { notifyPartnerPhotoSubmitted } from '@/services/notifications';
 import { createPhotoSignedUrl, uploadDropImage } from '@/services/storage';
 import type { DropSubmission, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
+const RECENT_DROPS_LIMIT = 10;
+const RECENT_DROPS_QUERY_LIMIT = 30;
+
 export async function getOrCreateTodayDrop(): Promise<TodayDropPayload> {
   const { data, error } = await supabase.rpc('get_or_create_today_drop');
   if (error) {
@@ -166,13 +169,21 @@ export async function getRecentDrops(coupleId: string): Promise<RecentDrop[]> {
     )
     .eq('couple_id', coupleId)
     .order('drop_date', { ascending: false })
-    .limit(10);
+    .limit(RECENT_DROPS_QUERY_LIMIT);
 
   if (error) {
     throw error;
   }
 
-  return Promise.all(((data ?? []) as RecentDrop[]).map(signRecentPhotoUrls));
+  const dropsWithPhotos = ((data ?? []) as RecentDrop[])
+    .map((drop) => ({
+      ...drop,
+      drop_submissions: drop.drop_submissions.filter(hasSubmissionPhoto),
+    }))
+    .filter((drop) => drop.drop_submissions.length > 0)
+    .slice(0, RECENT_DROPS_LIMIT);
+
+  return Promise.all(dropsWithPhotos.map(signRecentPhotoUrls));
 }
 
 async function signTodayPhotoUrls(payload: TodayDropPayload) {
@@ -189,11 +200,19 @@ async function signRecentPhotoUrls(drop: RecentDrop) {
   };
 }
 
+function hasSubmissionPhoto(submission: Pick<DropSubmission, 'image_url' | 'storage_path'>) {
+  return Boolean(submission.image_url?.trim() || submission.storage_path?.trim());
+}
+
 async function signSubmissionUrls<T extends { storage_path: string; image_url: string }>(submissions: T[]) {
   const signedUrlByPath = new Map<string, Promise<string>>();
 
   return Promise.all(
     submissions.map((submission) => {
+      if (!submission.storage_path?.trim()) {
+        return submission;
+      }
+
       if (!signedUrlByPath.has(submission.storage_path)) {
         signedUrlByPath.set(submission.storage_path, createPhotoSignedUrl(submission.storage_path));
       }
