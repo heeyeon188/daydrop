@@ -67,8 +67,8 @@ const PENDING_INVITE_CODE_STORAGE_KEY = 'daydrop.pendingInviteCode';
 const DEFAULT_PHOTO_PAIR_HEIGHT = 292;
 const STORY_TEMPLATE_BASE_WIDTH = 360;
 const STORY_TEMPLATE_BASE_HEIGHT = 640;
-const STORY_TEMPLATE_PHOTO_WIDTH = 344;
-const STORY_TEMPLATE_PHOTO_HEIGHT = 316;
+const STORY_TEMPLATE_PHOTO_WIDTH = 320;
+const STORY_TEMPLATE_PHOTO_HEIGHT = 294;
 const RECENT_THUMB_GROUP_WIDTH = 138;
 const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
 const RECENT_THUMB_DEFAULT_HEIGHT = 82;
@@ -1933,7 +1933,7 @@ function TodayShareSheet({
                   />
                 </View>
               </View>
-              <View style={[styles.storyNameRow, { width: storyLayout.photoWidth }]}>
+              <View style={[styles.storyNameRow, { width: Math.max(1, storyLayout.photoWidth - 28) }]}>
                 <View style={styles.storyPersonBlock}>
                   <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.68} numberOfLines={1} style={styles.storyName}>
                     {storyLayout.leftName}
@@ -1953,6 +1953,11 @@ function TodayShareSheet({
                     {storyLayout.rightLocation}
                   </Text>
                 </View>
+              </View>
+              <View style={[styles.storyDivider, { width: Math.max(1, storyLayout.photoWidth - 34) }]}>
+                <View style={styles.storyDividerLine} />
+                <View style={styles.storyDividerDot} />
+                <View style={styles.storyDividerLine} />
               </View>
               <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.72} numberOfLines={1} style={styles.storyDate}>
                 {storyLayout.date}
@@ -5044,31 +5049,31 @@ const styles = StyleSheet.create({
   },
   storyEyebrow: {
     color: '#979189',
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '800',
-    lineHeight: 14,
-    marginBottom: 12,
-    marginTop: 84,
+    lineHeight: 13,
+    marginBottom: 13,
+    marginTop: 80,
     textAlign: 'center',
   },
   storyMission: {
     color: '#050505',
-    fontSize: 21,
+    fontSize: 19,
     fontWeight: '900',
-    lineHeight: 28,
-    marginBottom: 14,
+    lineHeight: 27,
+    marginBottom: 18,
     textAlign: 'center',
-    width: 308,
+    width: 286,
   },
   storyPhotoShadow: {
     backgroundColor: '#F7F6F2',
     borderRadius: 8,
     elevation: 2,
-    marginBottom: 20,
+    marginBottom: 17,
     shadowColor: '#000000',
-    shadowOffset: { height: 3, width: 0 },
-    shadowOpacity: 0.1,
-    shadowRadius: 7,
+    shadowOffset: { height: 2, width: 0 },
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
   },
   storyPhotoRow: {
     alignItems: 'center',
@@ -5081,26 +5086,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 18,
+    marginBottom: 20,
   },
   storyPersonBlock: {
     alignItems: 'center',
-    width: 94,
+    width: 104,
   },
   storyName: {
     color: '#111111',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '900',
-    lineHeight: 16,
+    lineHeight: 15,
     textAlign: 'center',
     width: '100%',
   },
   storyLocation: {
     color: '#928E87',
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '800',
-    lineHeight: 14,
-    marginTop: 2,
+    lineHeight: 13,
+    marginTop: 1,
     textAlign: 'center',
     width: '100%',
   },
@@ -5114,21 +5119,39 @@ const styles = StyleSheet.create({
     marginTop: 2,
     textAlign: 'center',
   },
+  storyDivider: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 25,
+  },
+  storyDividerLine: {
+    backgroundColor: '#D9D4CB',
+    flex: 1,
+    height: 1,
+  },
+  storyDividerDot: {
+    backgroundColor: '#BDB6AA',
+    borderRadius: 1.5,
+    height: 3,
+    width: 3,
+  },
   storyDate: {
     color: '#8F8A83',
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '800',
-    lineHeight: 18,
-    marginBottom: 20,
+    letterSpacing: 1.2,
+    lineHeight: 16,
+    marginBottom: 23,
     textAlign: 'center',
     width: STORY_TEMPLATE_PHOTO_WIDTH,
   },
   storyBrand: {
     color: '#050505',
-    fontSize: 15,
+    fontSize: 13,
     fontWeight: '900',
     letterSpacing: 6,
-    lineHeight: 20,
+    lineHeight: 18,
     paddingLeft: 6,
     textAlign: 'center',
   },
