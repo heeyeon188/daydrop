@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 
 import { getTranslations, normalizeLanguage } from '@/lib/i18n';
-import { signInWithAppleIdToken, signInWithGoogle, signUpWithEmail } from '@/services/auth';
+import { logAppleSignInError, signInWithAppleIdToken, signInWithGoogle, signUpWithEmail } from '@/services/auth';
 
 function isAppleAuthCanceled(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ERR_REQUEST_CANCELED';
@@ -141,7 +141,7 @@ export default function SignupScreen() {
         return;
       }
 
-      console.error('Apple login error', error);
+      logAppleSignInError(error, { stage: 'signup.handleAppleSignIn.catch' });
       Alert.alert(t.socialSignInFailed, t.tryAgain);
     } finally {
       authSubmittingRef.current = false;

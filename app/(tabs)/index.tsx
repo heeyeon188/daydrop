@@ -46,7 +46,7 @@ import { useProfile } from '@/hooks/useProfile';
 import { useSession } from '@/hooks/useSession';
 import { useTodayDrop } from '@/hooks/useTodayDrop';
 import { deleteAccount } from '@/services/account';
-import { signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut } from '@/services/auth';
+import { logAppleSignInError, signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut } from '@/services/auth';
 import { createCoupleInvite, disconnectPartnerConnection, joinCoupleByInviteCode, selectCouple, type MyCouple, type MyCoupleOption } from '@/services/couple';
 import { deleteMyTodayDropPhoto, submitDropPhoto } from '@/services/drops';
 import {
@@ -3396,7 +3396,7 @@ function AuthScreen({ language }: { language: Language }) {
         return;
       }
 
-      console.error('Apple login error', error);
+      logAppleSignInError(error, { stage: 'AuthScreen.handleAppleSignIn.catch' });
       Alert.alert(t.socialSignInFailed, t.tryAgain);
     } finally {
       authSubmittingRef.current = false;
@@ -4474,9 +4474,9 @@ const styles = StyleSheet.create({
   },
   missionTitle: {
     color: '#111111',
-    fontSize: 18,
-    fontWeight: '700',
-    lineHeight: 24,
+    fontSize: 16,
+    fontWeight: '800',
+    lineHeight: 22,
     marginBottom: 6,
   },
   missionMeta: {

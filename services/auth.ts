@@ -8,6 +8,10 @@ WebBrowser.maybeCompleteAuthSession();
 
 const GOOGLE_OAUTH_CALLBACK_PATH = 'auth/callback';
 const GOOGLE_OAUTH_NATIVE_REDIRECT = 'daydrop://auth/callback';
+const APP_SCHEME = 'daydrop';
+const IOS_BUNDLE_IDENTIFIER = 'com.heeyeonkim112.daydrop';
+const EXPO_SLUG = 'daydrop';
+const EAS_PROJECT_ID = '4bbf1d8c-1d3e-4e72-9417-e7022119fc58';
 const LOCALHOST_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 
 export async function signInWithEmail(email: string, password: string) {
@@ -71,12 +75,52 @@ export async function signInWithAppleIdToken(identityToken: string, fullName?: A
   });
 
   if (error) {
+    logAppleSignInError(error, { stage: 'supabase.signInWithIdToken' });
     throw error;
   }
 
   await saveAppleFullName(data.user?.id, data.user?.user_metadata, fullName);
 
   return data;
+}
+
+export function logAppleSignInError(error: unknown, extra?: Record<string, unknown>) {
+  const context = getAppleAuthDebugContext();
+  const details = {
+    message: getErrorField(error, 'message'),
+    status: getErrorField(error, 'status'),
+    name: getErrorField(error, 'name'),
+    provider: context.provider,
+    redirectTo: context.redirectTo,
+    ...extra,
+    context,
+  };
+
+  console.log('[Apple login] detailed error', details);
+  console.log('[Apple login] full error object from Supabase/AuthSession/AppleAuthentication', error);
+}
+
+export function getAppleAuthDebugContext() {
+  const redirectCandidates = getAuthRedirectCandidates();
+  const expectedNativeRedirectTo = `${APP_SCHEME}://${GOOGLE_OAUTH_CALLBACK_PATH}`;
+
+  return {
+    provider: 'apple',
+    redirectTo: null,
+    note: 'Apple login uses expo-apple-authentication + supabase.auth.signInWithIdToken, so redirectTo is not sent for Apple.',
+    expectedNativeRedirectTo,
+    activeOAuthRedirectTo: resolveEnvironmentRedirectUriForDiagnostics(),
+    redirectCandidates,
+    appConfig: {
+      iosBundleIdentifier: Constants.expoConfig?.ios?.bundleIdentifier ?? IOS_BUNDLE_IDENTIFIER,
+      scheme: Constants.expoConfig?.scheme ?? APP_SCHEME,
+      slug: Constants.expoConfig?.slug ?? EXPO_SLUG,
+      easProjectId: Constants.expoConfig?.extra?.eas?.projectId ?? EAS_PROJECT_ID,
+      usesAppleSignIn: Constants.expoConfig?.ios?.usesAppleSignIn ?? true,
+    },
+    executionEnvironment: Constants.executionEnvironment,
+    platform: Platform.OS,
+  };
 }
 
 export async function signOut() {
@@ -138,6 +182,32 @@ function buildExpoGoRedirectFallback() {
   }
 
   return null;
+}
+
+function resolveEnvironmentRedirectUriForDiagnostics() {
+  if (Platform.OS === 'web') {
+    return AuthSession.makeRedirectUri({
+      path: GOOGLE_OAUTH_CALLBACK_PATH,
+      scheme: APP_SCHEME,
+    });
+  }
+
+  if (Constants.executionEnvironment === ExecutionEnvironment.StoreClient) {
+    return buildExpoGoRedirectFallback() ?? AuthSession.makeRedirectUri({
+      path: GOOGLE_OAUTH_CALLBACK_PATH,
+      scheme: APP_SCHEME,
+    });
+  }
+
+  return GOOGLE_OAUTH_NATIVE_REDIRECT;
+}
+
+function getAuthRedirectCandidates() {
+  return {
+    expoGo: buildExpoGoRedirectFallback(),
+    testFlight: GOOGLE_OAUTH_NATIVE_REDIRECT,
+    production: GOOGLE_OAUTH_NATIVE_REDIRECT,
+  };
 }
 
 function buildRedirectUriFromHostUri(hostUri?: string | null) {
@@ -281,4 +351,16 @@ function formatAppleFullName(fullName?: AppleAuthFullName | null) {
 
 function compactObject<T extends Record<string, string | null | undefined>>(value: T) {
   return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => Boolean(entry[1]?.trim())));
+}
+
+function getErrorField(error: unknown, field: 'message' | 'name' | 'status') {
+  if (error && typeof error === 'object' && field in error) {
+    return (error as Record<string, unknown>)[field];
+  }
+
+  if (field === 'message' && typeof error === 'string') {
+    return error;
+  }
+
+  return null;
 }
