@@ -10,6 +10,13 @@ import { supabase } from '@/lib/supabase';
 export type NotificationPreferenceKey = 'dailyQuestion' | 'partnerConnected' | 'partnerPhotoUploaded' | 'pushEnabled';
 
 export type NotificationPreferences = Record<NotificationPreferenceKey, boolean>;
+export type NotificationPermissionState = 'denied' | 'granted' | 'undetermined';
+
+type NotificationPermissionFields = {
+  canAskAgain?: boolean;
+  granted?: boolean;
+  status?: NotificationPermissionState;
+};
 
 type CoupleEventPayload =
   | {
@@ -35,6 +42,38 @@ const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
   partnerPhotoUploaded: true,
   pushEnabled: true,
 };
+
+function getNotificationPermissionFields(
+  settings: Notifications.NotificationPermissionsStatus
+): NotificationPermissionFields {
+  return settings as Notifications.NotificationPermissionsStatus & NotificationPermissionFields;
+}
+
+export function getNotificationPermissionState(
+  settings: Notifications.NotificationPermissionsStatus
+): NotificationPermissionState {
+  const permission = getNotificationPermissionFields(settings);
+  const granted =
+    permission.granted === true ||
+    settings.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL ||
+    settings.ios?.status === Notifications.IosAuthorizationStatus.EPHEMERAL;
+
+  if (granted) {
+    return 'granted';
+  }
+
+  if (permission.status === 'denied' || permission.canAskAgain === false) {
+    return 'denied';
+  }
+
+  return 'undetermined';
+}
+
+function getNotificationPermissionStatus(
+  settings: Notifications.NotificationPermissionsStatus
+): NotificationPermissionState | undefined {
+  return getNotificationPermissionFields(settings).status;
+}
 
 function getExpoProjectId() {
   return Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId ?? null;
@@ -81,10 +120,10 @@ export async function registerForPushNotificationsAsync() {
       return null;
     }
 
-    const { status: existingStatus } = await Notifications.getPermissionsAsync();
-    let finalStatus = existingStatus;
+    const existingSettings = await Notifications.getPermissionsAsync();
+    let finalStatus = getNotificationPermissionStatus(existingSettings);
 
-    if (existingStatus !== 'granted') {
+    if (finalStatus !== 'granted') {
       const requested = await Notifications.requestPermissionsAsync({
         ios: {
           allowAlert: true,
@@ -92,7 +131,7 @@ export async function registerForPushNotificationsAsync() {
           allowSound: true,
         },
       });
-      finalStatus = requested.status;
+      finalStatus = getNotificationPermissionStatus(requested);
     }
 
     if (finalStatus !== 'granted') {

@@ -50,6 +50,7 @@ import { signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut } fr
 import { createCoupleInvite, disconnectPartnerConnection, joinCoupleByInviteCode, selectCouple, type MyCouple, type MyCoupleOption } from '@/services/couple';
 import { deleteMyTodayDropPhoto, submitDropPhoto } from '@/services/drops';
 import {
+  getNotificationPermissionState,
   getNotificationPreferences,
   registerPushToken,
   saveNotificationPreferences,
@@ -2219,18 +2220,7 @@ function SettingsSheet({
   const refreshNotificationPermission = React.useCallback(async () => {
     try {
       const settings = await Notifications.getPermissionsAsync();
-      const granted =
-        settings.granted ||
-        settings.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL ||
-        settings.ios?.status === Notifications.IosAuthorizationStatus.EPHEMERAL;
-
-      if (granted) {
-        setNotificationPermission('granted');
-      } else if (settings.status === 'denied' || settings.canAskAgain === false) {
-        setNotificationPermission('denied');
-      } else {
-        setNotificationPermission('undetermined');
-      }
+      setNotificationPermission(getNotificationPermissionState(settings));
     } catch (error) {
       console.warn('notification permission check failed', error);
       setNotificationPermission('undetermined');
