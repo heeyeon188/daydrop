@@ -25,10 +25,11 @@ export async function submitDropPhoto({
   coupleId,
   dropId,
   fileInfo,
+  shouldNotifyPartner = true,
   userId,
 }: {
   base64: string;
-  coupleId: string;
+  coupleId?: string | null;
   dropId: string;
   fileInfo?: {
     base64Used?: boolean;
@@ -43,8 +44,13 @@ export async function submitDropPhoto({
     uri: string;
     width: number;
   };
+  shouldNotifyPartner?: boolean;
   userId: string;
 }) {
+  if (!coupleId) {
+    throw new Error('missing_couple_id');
+  }
+
   console.log('[photo] submit drop photo', {
     coupleId,
     dropId,
@@ -96,10 +102,12 @@ export async function submitDropPhoto({
     fileInfo,
   });
 
-  void notifyPartnerPhotoSubmitted({
-    coupleId,
-    dropSubmissionId: data.id,
-  });
+  if (shouldNotifyPartner) {
+    void notifyPartnerPhotoSubmitted({
+      coupleId,
+      dropSubmissionId: data.id,
+    });
+  }
 
   return data as DropSubmission;
 }

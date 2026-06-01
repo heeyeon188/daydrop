@@ -29,15 +29,6 @@ export async function signUpWithEmail(email: string, password: string) {
 
 export async function signInWithGoogle() {
   const redirectTo = resolveGoogleRedirectUri();
-  console.log('[Google OAuth] start', {
-    appScheme: Constants.expoConfig?.scheme,
-    executionEnvironment: Constants.executionEnvironment,
-    hostUri: Constants.expoConfig?.hostUri,
-    isExpoGo: Constants.executionEnvironment === ExecutionEnvironment.StoreClient,
-    linkingUri: Constants.linkingUri,
-    platform: Platform.OS,
-    redirectTo,
-  });
 
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
@@ -56,7 +47,6 @@ export async function signInWithGoogle() {
   }
 
   const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
-  console.log('[Google OAuth] auth session result', result);
   if (result.type !== 'success' || !result.url) {
     return false;
   }
@@ -185,8 +175,6 @@ function isLocalhostRedirectUri(redirectTo: string) {
 }
 
 async function completeOAuthSession(url: string) {
-  console.log('[Google OAuth] callback URL', url);
-
   const parsed = new URL(url);
   const params = new URLSearchParams(parsed.search);
 
@@ -199,10 +187,8 @@ async function completeOAuthSession(url: string) {
   if (code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (error) {
-      console.error('[Google OAuth] exchangeCodeForSession failed', error);
       throw error;
     }
-    console.log('[Google OAuth] exchangeCodeForSession succeeded');
     return;
   }
 
@@ -217,8 +203,6 @@ async function completeOAuthSession(url: string) {
     refresh_token: refreshToken,
   });
   if (error) {
-    console.error('[Google OAuth] setSession failed', error);
     throw error;
   }
-  console.log('[Google OAuth] setSession succeeded');
 }

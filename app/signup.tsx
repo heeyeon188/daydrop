@@ -9,6 +9,7 @@ import {
   Platform,
   Pressable,
   SafeAreaView,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -156,7 +157,7 @@ export default function SignupScreen() {
             <Feather name="chevron-left" size={26} color="#111111" />
           </Pressable>
         </View>
-        <View style={styles.content}>
+        <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <Text allowFontScaling={false} style={styles.title}>
             {language === 'ko' ? '계정 만들기' : 'Create account'}
           </Text>
@@ -221,7 +222,7 @@ export default function SignupScreen() {
               <Text style={styles.loginPromptLink}>{t.login}</Text>
             </Text>
           </Pressable>
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -248,10 +249,11 @@ const styles = StyleSheet.create({
     width: 40,
   },
   content: {
-    flex: 1,
+    flexGrow: 1,
     justifyContent: 'center',
     paddingBottom: 36,
     paddingHorizontal: 24,
+    paddingTop: 12,
   },
   title: {
     color: '#050505',

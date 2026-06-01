@@ -72,6 +72,7 @@ type TranslationKey =
   | 'noRecentDrops'
   | 'openAfterSend'
   | 'partner'
+  | 'partnerAddedSuccess'
   | 'partnerTypeCommon'
   | 'partnerTypeFriend'
   | 'partnerTypeFriendOnly'
@@ -199,6 +200,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     noRecentDrops: '아직 지난 Drop이 없어요.',
     openAfterSend: '내 하루를 보내면 함께 열 수 있어요.',
     partner: '상대',
+    partnerAddedSuccess: '파트너가 등록되었습니다.',
     partnerTypeCommon: '공통',
     partnerTypeFriend: '친구',
     partnerTypeFriendOnly: '친구에게만',
@@ -325,6 +327,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     noRecentDrops: 'No recent Drops yet.',
     openAfterSend: 'Send your day to open it together.',
     partner: 'Partner',
+    partnerAddedSuccess: 'Partner has been added.',
     partnerTypeCommon: 'Common',
     partnerTypeFriend: 'Friend',
     partnerTypeFriendOnly: 'Friend only',

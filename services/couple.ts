@@ -118,9 +118,11 @@ export async function getMyCouple(): Promise<MyCouple | null> {
     return null;
   }
 
+  const selectedActiveCouple = availableCouples.find((option) => option.couple.id === profile?.selected_couple_id && option.couple.status === 'active');
   const selected =
-    availableCouples.find((option) => option.couple.id === profile?.selected_couple_id) ??
+    selectedActiveCouple ??
     availableCouples.find((option) => option.couple.status === 'active') ??
+    availableCouples.find((option) => option.couple.id === profile?.selected_couple_id) ??
     availableCouples[0];
 
   return {
@@ -158,6 +160,8 @@ export async function disconnectPartnerConnection(coupleId: string) {
 }
 
 export async function createCoupleInvite(partnerType: PartnerType) {
+  const currentCouple = await getMyCouple();
+  const activeCoupleId = currentCouple?.couple.status === 'active' ? currentCouple.couple.id : null;
   const { data, error } = await supabase.rpc('create_couple_invite', {
     p_relationship_start_date: null,
     p_partner_type: partnerType,
@@ -165,7 +169,9 @@ export async function createCoupleInvite(partnerType: PartnerType) {
   if (error) {
     throw error;
   }
-  console.log('[connection] invite relationship_type saved', { relationshipType: partnerType });
+  if (activeCoupleId) {
+    await selectCouple(activeCoupleId);
+  }
   return data as string;
 }
 
@@ -179,11 +185,6 @@ export async function joinCoupleByInviteCode(inviteCode: string) {
   }
 
   const coupleId = data as string;
-  const { data: couple } = await supabase.from('couples').select('id, partner_type').eq('id', coupleId).maybeSingle();
-  console.log('[connection] joined relationship_type', {
-    coupleId,
-    relationshipType: couple?.partner_type ?? null,
-  });
   void notifyPartnerConnected(coupleId);
   return coupleId;
 }
