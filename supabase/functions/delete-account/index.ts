@@ -5,6 +5,8 @@ type Submission = {
   storage_path: string | null;
 };
 
+type SupabaseAdminClient = ReturnType<typeof createClient>;
+
 const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Origin': '*',
@@ -47,30 +49,7 @@ Deno.serve(async (req) => {
 
     const userId = user.id;
 
-    const { data: submissions, error: submissionsError } = await adminClient
-      .from('drop_submissions')
-      .select('storage_path')
-      .eq('user_id', userId);
-
-    if (submissionsError) {
-      throw submissionsError;
-    }
-
-    const storagePaths = ((submissions ?? []) as Submission[])
-      .map((submission) => submission.storage_path)
-      .filter((path): path is string => Boolean(path));
-
-    for (let index = 0; index < storagePaths.length; index += 100) {
-      const chunk = storagePaths.slice(index, index + 100);
-      if (!chunk.length) {
-        continue;
-      }
-
-      const { error: removeError } = await adminClient.storage.from('daydrop-photos').remove(chunk);
-      if (removeError) {
-        throw removeError;
-      }
-    }
+    await deleteMyUploadedPhotosForAccountDeletion(adminClient, userId);
 
     const { data: memberships, error: membershipsError } = await adminClient
       .from('couple_members')
@@ -121,6 +100,35 @@ async function throwIfError<T>(request: PromiseLike<{ error: Error | null; data?
   const { error } = await request;
   if (error) {
     throw error;
+  }
+}
+
+async function deleteMyUploadedPhotosForAccountDeletion(adminClient: SupabaseAdminClient, userId: string) {
+  const { data: submissions, error: submissionsError } = await adminClient
+    .from('drop_submissions')
+    .select('storage_path')
+    .eq('user_id', userId);
+
+  if (submissionsError) {
+    console.error('delete-account photo path lookup failed', { userId, error: submissionsError });
+    throw submissionsError;
+  }
+
+  const storagePaths = ((submissions ?? []) as Submission[])
+    .map((submission) => submission.storage_path)
+    .filter((path): path is string => Boolean(path));
+
+  for (let index = 0; index < storagePaths.length; index += 100) {
+    const chunk = storagePaths.slice(index, index + 100);
+    if (!chunk.length) {
+      continue;
+    }
+
+    const { error: removeError } = await adminClient.storage.from('daydrop-photos').remove(chunk);
+    if (removeError) {
+      console.error('delete-account storage cleanup failed', { userId, paths: chunk, error: removeError });
+      throw removeError;
+    }
   }
 }
 

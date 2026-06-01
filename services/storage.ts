@@ -6,7 +6,7 @@ import * as ImagePicker from 'expo-image-picker';
 
 import { supabase } from '@/lib/supabase';
 
-const BUCKET = 'daydrop-photos';
+export const DROP_PHOTOS_BUCKET = 'daydrop-photos';
 const UPLOAD_MAX_LONG_EDGE = 1440;
 const UPLOAD_JPEG_QUALITY = 0.82;
 const SIGNED_URL_TTL_SECONDS = 60 * 60;
@@ -288,7 +288,7 @@ export async function uploadDropImage({
     byteLength: uploadData.byteLength,
   });
 
-  const { error } = await supabase.storage.from(BUCKET).upload(storagePath, uploadData, {
+  const { error } = await supabase.storage.from(DROP_PHOTOS_BUCKET).upload(storagePath, uploadData, {
     contentType: 'image/jpeg',
     upsert: false,
   });
@@ -298,7 +298,7 @@ export async function uploadDropImage({
   }
 
   console.log('[photo] uploaded image', {
-    bucket: BUCKET,
+    bucket: DROP_PHOTOS_BUCKET,
     storagePath,
     contentType: 'image/jpeg',
     byteLength: uploadData.byteLength,
@@ -381,7 +381,7 @@ export async function createPhotoSignedUrl(storagePath: string) {
     return cached.url;
   }
 
-  const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
+  const { data, error } = await supabase.storage.from(DROP_PHOTOS_BUCKET).createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
   if (error) {
     throw error;
   }
@@ -394,6 +394,58 @@ export async function createPhotoSignedUrl(storagePath: string) {
   return data.signedUrl;
 }
 
+export async function deletePhotoStorageFile(path: string) {
+  const normalizedPath = path.trim();
+  if (!normalizedPath) {
+    throw new Error('missing_storage_path');
+  }
+
+  const { data, error } = await supabase.storage.from(DROP_PHOTOS_BUCKET).remove([normalizedPath]);
+  if (error) {
+    console.error('[photo] storage file delete failed', { bucket: DROP_PHOTOS_BUCKET, path: normalizedPath, data, error });
+    throw error;
+  }
+
+  signedUrlCache.delete(normalizedPath);
+  return data;
+}
+
+export async function deletePhotoStorageFiles(paths: string[]) {
+  const normalizedPaths = Array.from(new Set(paths.map((path) => path.trim()).filter(Boolean)));
+  if (!normalizedPaths.length) {
+    return [];
+  }
+
+  const { data, error } = await supabase.storage.from(DROP_PHOTOS_BUCKET).remove(normalizedPaths);
+  if (error) {
+    console.error('[photo] storage files batch delete failed', {
+      bucket: DROP_PHOTOS_BUCKET,
+      paths: normalizedPaths,
+      data,
+      error,
+    });
+    throw error;
+  }
+
+  normalizedPaths.forEach((path) => signedUrlCache.delete(path));
+  return data;
+}
+
+export function extractStoragePathFromUrl(url: string) {
+  try {
+    const parsedUrl = new URL(url);
+    const marker = `/storage/v1/object/public/${DROP_PHOTOS_BUCKET}/`;
+    const markerIndex = parsedUrl.pathname.indexOf(marker);
+    if (markerIndex === -1) {
+      return null;
+    }
+
+    return decodeURIComponent(parsedUrl.pathname.slice(markerIndex + marker.length));
+  } catch {
+    return null;
+  }
+}
+
 async function createUploadImageUrl(storagePath: string) {
   try {
     return await createPhotoSignedUrl(storagePath);
@@ -401,5 +453,5 @@ async function createUploadImageUrl(storagePath: string) {
     // Fall through to a public URL for compatibility with older bucket settings.
   }
 
-  return supabase.storage.from(BUCKET).getPublicUrl(storagePath).data.publicUrl;
+  return supabase.storage.from(DROP_PHOTOS_BUCKET).getPublicUrl(storagePath).data.publicUrl;
 }

@@ -1,6 +1,11 @@
 import { supabase } from '@/lib/supabase';
 import { notifyPartnerPhotoSubmitted } from '@/services/notifications';
-import { createPhotoSignedUrl, uploadDropImage } from '@/services/storage';
+import {
+  createPhotoSignedUrl,
+  deletePhotoStorageFile,
+  extractStoragePathFromUrl,
+  uploadDropImage,
+} from '@/services/storage';
 import type { DropSubmission, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
 const RECENT_DROPS_LIMIT = 10;
@@ -92,6 +97,12 @@ export async function submitDropPhoto({
     .single();
 
   if (error) {
+    await deletePhotoStorageFile(uploaded.storagePath).catch((cleanupError) => {
+      console.error('[photo] uploaded storage cleanup failed after db insert error', {
+        storagePath: uploaded.storagePath,
+        error: cleanupError,
+      });
+    });
     throw error;
   }
 
@@ -146,12 +157,7 @@ export async function deleteMyTodayDropPhoto({
     throw new Error('missing_storage_path');
   }
 
-  const { data: removeData, error: removeError } = await supabase.storage.from('daydrop-photos').remove([storagePath]);
-
-  if (removeError) {
-    console.error('[delete] storage remove failed', removeError, removeData);
-    throw removeError;
-  }
+  await deletePhotoStorageFile(storagePath);
 
   const deleteRowRpcName = 'delete_my_today_drop_photo_row';
   const deleteRowRpcParams = { target_storage_path: storagePath };
@@ -163,6 +169,57 @@ export async function deleteMyTodayDropPhoto({
   }
 
   return (deleteData ?? { deleted: false, drop_id: target?.drop_id, storage_path: storagePath }) as DeleteMyTodayDropPhotoResult;
+}
+
+export async function deletePhotoSubmission(submissionId: string) {
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError || !user) {
+    console.error('[delete] submission delete auth lookup failed', userError);
+    throw userError ?? new Error('not_authenticated');
+  }
+
+  const { data: submission, error: lookupError } = await supabase
+    .from('drop_submissions')
+    .select('id, user_id, storage_path, image_url')
+    .eq('id', submissionId)
+    .maybeSingle();
+
+  if (lookupError) {
+    console.error('[delete] submission lookup failed', lookupError, { submissionId, userId: user.id });
+    throw lookupError;
+  }
+
+  if (!submission) {
+    throw new Error('photo_not_found');
+  }
+
+  if (submission.user_id !== user.id) {
+    console.error('[delete] blocked non-owner submission delete', { submissionId, ownerId: submission.user_id, userId: user.id });
+    throw new Error('not_photo_owner');
+  }
+
+  const storagePath = submission.storage_path?.trim() || extractStoragePathFromUrl(submission.image_url)?.trim();
+  if (!storagePath) {
+    throw new Error('missing_storage_path');
+  }
+
+  await deletePhotoStorageFile(storagePath);
+
+  const { data: deleteData, error: deleteError } = await supabase.rpc('delete_my_drop_submission_photo_row', {
+    target_storage_path: storagePath,
+    target_submission_id: submissionId,
+  });
+
+  if (deleteError) {
+    console.error('[delete] submission row delete failed', deleteError, { submissionId, storagePath, userId: user.id });
+    throw deleteError;
+  }
+
+  return deleteData as DeleteMyTodayDropPhotoResult;
 }
 
 export async function getRecentDrops(coupleId: string): Promise<RecentDrop[]> {
