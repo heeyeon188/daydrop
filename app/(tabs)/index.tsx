@@ -119,7 +119,7 @@ type SafeImageResizeMode = React.ComponentProps<typeof RNImage>['resizeMode'];
 const imageSizeCache = new Map<string, ImageSize>();
 const imageSizeInFlight = new Map<string, Promise<ImageSize>>();
 
-const ULTRA_WIDE_BACK_LENS_PATTERNS = ['ultra', '0.5', 'ì´ˆê´‘ê°'];
+const ULTRA_WIDE_BACK_LENS_PATTERNS = ['ultra', '0.5', '초광각'];
 const NON_DEFAULT_BACK_LENS_PATTERNS = [
   'tele',
   'dual',
@@ -129,12 +129,12 @@ const NON_DEFAULT_BACK_LENS_PATTERNS = [
   'true',
   'desk',
   'continuity',
-  'ë§ì›',
-  'ë“€ì–¼',
-  'íŠ¸ë¦¬í”Œ',
-  'ì‹¬ë„',
+  '망원',
+  '듀얼',
+  '트리플',
+  '심도',
 ];
-const DEFAULT_BACK_LENS_PATTERNS = ['wide angle', 'wide-angle', 'wide', 'back camera', 'camera', 'ê´‘ê°', 'í›„ë©´', 'ì¹´ë©”ë¼'];
+const DEFAULT_BACK_LENS_PATTERNS = ['wide angle', 'wide-angle', 'wide', 'back camera', 'camera', '광각', '후면', '카메라'];
 
 function selectDefaultBackLens(lenses: string[]) {
   const nonUltraWideBackLenses = lenses.filter((lens) => {
@@ -157,7 +157,6 @@ export default function MissionScreen() {
   const profileState = useProfile(user?.id);
   const myCouple = useMyCouple(Boolean(user));
   const language = normalizeLanguage(profileState.profile?.preferred_language);
-  const t = getTranslations(language);
   const [pendingInviteCode, setPendingInviteCode] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -198,7 +197,7 @@ export default function MissionScreen() {
   }, []);
 
   if (sessionLoading) {
-    return <CenteredState text={t.loadingApp} />;
+    return <AppLoadingScreen />;
   }
 
   if (configError) {
@@ -210,7 +209,11 @@ export default function MissionScreen() {
   }
 
   if (profileState.loading) {
-    return <CenteredState text={t.loadingApp} />;
+    return <AppLoadingScreen />;
+  }
+
+  if (myCouple.loading && !myCouple.couple) {
+    return <AppLoadingScreen />;
   }
 
   if (!profileState.profile?.profile_completed) {
@@ -234,6 +237,7 @@ export default function MissionScreen() {
       myUserId={user.id}
       latestDisconnectedCouple={myCouple.latestDisconnectedCouple}
       onCoupleChanged={myCouple.refetch}
+      onCoupleSelected={myCouple.selectOptimistic}
       onPendingInviteCodeHandled={() => setPendingInviteCode(null)}
       onLanguageChanged={profileState.setProfile}
       onLogout={signOut}
@@ -253,6 +257,7 @@ function MissionContent({
   myCouple,
   myUserId,
   onCoupleChanged,
+  onCoupleSelected,
   onPendingInviteCodeHandled,
   onLanguageChanged,
   onLogout,
@@ -265,6 +270,7 @@ function MissionContent({
   myCouple: MyCouple | null;
   myUserId: string;
   onCoupleChanged: () => Promise<void>;
+  onCoupleSelected: (coupleId: string) => void;
   onPendingInviteCodeHandled: () => void;
   onLanguageChanged: (profile: Profile) => void;
   onLogout: () => Promise<void>;
@@ -273,7 +279,7 @@ function MissionContent({
   profile: Profile;
 }) {
   const t = getTranslations(language);
-  const { today, recentDrops, loading, refreshing, error, refetch } = useTodayDrop(true, myCouple?.couple.id);
+  const { today, recentDrops, loading, refreshing, error, applyLocalSubmission, refetch } = useTodayDrop(true, myCouple?.couple.id);
   const [deletingPhoto, setDeletingPhoto] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const [fullImage, setFullImage] = React.useState<FullImage | null>(null);
@@ -428,7 +434,7 @@ function MissionContent({
       setUploading(true);
       const picked = await normalizeCameraPhoto(asset, source);
 
-      await submitDropPhoto({
+      const submission = await submitDropPhoto({
         base64: picked.base64 ?? '',
         coupleId: today.daily_drop.couple_id ?? today.couple?.id,
         dropId: today.daily_drop.id,
@@ -448,14 +454,15 @@ function MissionContent({
         userId: myUserId,
         shouldNotifyPartner: hasPartner,
       });
-      await refetch(true);
+      applyLocalSubmission(submission);
       setCameraVisible(false);
+      void refetch(true);
     } catch (nextError) {
       const message = nextError instanceof Error ? nextError.message : '';
       if (message === 'photo_permission_denied') {
-        Alert.alert(t.photoPermission, language === 'ko' ? 'ì„¤ì •ì—ì„œ ì¹´ë©”ë¼ ê¶Œí•œì„ í—ˆìš©í•´ì£¼ì„¸ìš”.' : 'Please allow camera access in Settings.', [
+        Alert.alert(t.photoPermission, language === 'ko' ? '설정에서 카메라 권한을 허용해주세요.' : 'Please allow camera access in Settings.', [
           { text: t.cancel, style: 'cancel' },
-          { text: language === 'ko' ? 'ì„¤ì • ì—´ê¸°' : 'Open Settings', onPress: () => Linking.openSettings() },
+          { text: language === 'ko' ? '설정 열기' : 'Open Settings', onPress: () => Linking.openSettings() },
         ]);
       } else {
         console.error('submitDropPhoto failed', nextError);
@@ -535,11 +542,12 @@ function MissionContent({
 
     try {
       setPartnerMenuVisible(false);
+      onCoupleSelected(coupleId);
       await selectCouple(coupleId);
-      await onCoupleChanged();
-      await refetch(true);
+      await Promise.all([onCoupleChanged(), refetch(true)]);
     } catch (nextError) {
       console.error('select couple failed', nextError);
+      await onCoupleChanged();
       Alert.alert(t.partnerSelectError, t.unknownError);
     }
   };
@@ -556,7 +564,7 @@ function MissionContent({
   };
 
   if (loading && !today) {
-    return <CenteredState text={t.loadingMission} />;
+    return <AppLoadingScreen />;
   }
 
   return (
@@ -617,7 +625,7 @@ function MissionContent({
                 styles.primaryButton,
                 mainButtonDisabled && styles.disabledButton,
               ]}>
-              {uploading && hasPartner ? (
+              {uploading ? (
                 <ActivityIndicator color="#FFFFFF" />
               ) : (
                 <Text
@@ -803,14 +811,16 @@ function DaydropCameraModal({
       return;
     }
 
-    console.log('[DaydropCamera] state', {
-      facing,
-      hasPermission,
-      cameraReady,
-      isCapturing: capturing,
-      hasCameraRef: Boolean(cameraRef.current),
-      shutterDisabled,
-    });
+    if (__DEV__) {
+      console.log('[DaydropCamera] state', {
+        facing,
+        hasPermission,
+        cameraReady,
+        isCapturing: capturing,
+        hasCameraRef: Boolean(cameraRef.current),
+        shutterDisabled,
+      });
+    }
   }, [cameraReady, captured, capturing, facing, hasPermission, shutterDisabled, visible]);
 
   const updateDefaultBackLens = React.useCallback((lenses: string[]) => {
@@ -825,20 +835,24 @@ function DaydropCameraModal({
     const captureFacing: CameraFacing = facing === 'front' ? 'front' : 'back';
 
     if (!camera || shutterDisabled) {
-      console.log('[DaydropCamera] capture blocked', {
-        facing: captureFacing,
-        hasPermission,
-        cameraReady,
-        isCapturing: capturing,
-        hasCameraRef: Boolean(camera),
-        shutterDisabled,
-      });
+      if (__DEV__) {
+        console.log('[DaydropCamera] capture blocked', {
+          facing: captureFacing,
+          hasPermission,
+          cameraReady,
+          isCapturing: capturing,
+          hasCameraRef: Boolean(camera),
+          shutterDisabled,
+        });
+      }
       return;
     }
 
     try {
       setCapturing(true);
-      console.log('[DaydropCamera] capture start', { facing: captureFacing });
+      if (__DEV__) {
+        console.log('[DaydropCamera] capture start', { facing: captureFacing });
+      }
       const photo = await camera.takePictureAsync({
         base64: true,
         exif: true,
@@ -864,29 +878,31 @@ function DaydropCameraModal({
         captureFacing
       );
 
-      console.log('[DaydropCamera] captured', {
-        facing: captureFacing,
-        capturedUri: photo.uri,
-        uploadUri: normalized.uploadUri ?? normalized.uri,
-        originalWidth: photo.width,
-        originalHeight: photo.height,
-        width: normalized.width,
-        height: normalized.height,
-        base64Used: Boolean(normalized.base64),
-        orientation: normalized.exif?.Orientation ?? normalized.exif?.orientation ?? null,
-        mirrorMode: normalized.mirrorMode ?? 'none',
-        resizeApplied: normalized.resized === true,
-        compressApplied: normalized.compressed === true,
-        reencodeApplied: normalized.reencoded === true,
-        didFlip: normalized.didFlip === true,
-        fileSize: await getLocalFileSize(normalized.uploadUri ?? normalized.uri),
-      });
+      if (__DEV__) {
+        console.log('[DaydropCamera] captured', {
+          facing: captureFacing,
+          capturedUri: photo.uri,
+          uploadUri: normalized.uploadUri ?? normalized.uri,
+          originalWidth: photo.width,
+          originalHeight: photo.height,
+          width: normalized.width,
+          height: normalized.height,
+          base64Used: Boolean(normalized.base64),
+          orientation: normalized.exif?.Orientation ?? normalized.exif?.orientation ?? null,
+          mirrorMode: normalized.mirrorMode ?? 'none',
+          resizeApplied: normalized.resized === true,
+          compressApplied: normalized.compressed === true,
+          reencodeApplied: normalized.reencoded === true,
+          didFlip: normalized.didFlip === true,
+          fileSize: await getLocalFileSize(normalized.uploadUri ?? normalized.uri),
+        });
+      }
 
       setCaptured({ ...normalized, source: captureFacing });
     } catch (nextError) {
       console.error('[DaydropCamera] capture error', { facing: captureFacing, error: nextError });
       console.error('custom camera capture failed', nextError);
-      Alert.alert(language === 'ko' ? 'ì‚¬ì§„ì„ ì°ì§€ ëª»í–ˆì–´ìš”.' : 'Could not take photo', language === 'ko' ? 'ë‹¤ì‹œ ì‹œë„í•´ì£¼ì„¸ìš”.' : 'Please try again.');
+      Alert.alert(language === 'ko' ? '사진을 찍지 못했어요.' : 'Could not take photo', language === 'ko' ? '다시 시도해주세요.' : 'Please try again.');
     } finally {
       setCapturing(false);
     }
@@ -927,9 +943,9 @@ function DaydropCameraModal({
     setFacing((current) => (current === 'front' ? 'back' : 'front'));
   };
 
-  const topMission = mission || (language === 'ko' ? 'ì˜¤ëŠ˜ì˜ Mission' : "Today's Mission");
-  const permissionText = language === 'ko' ? 'ì‚¬ì§„ì„ ë³´ë‚´ë ¤ë©´ ì¹´ë©”ë¼ ê¶Œí•œì´ í•„ìš”í•´ìš”.' : 'Camera permission is needed to send a photo.';
-  const permissionButtonText = language === 'ko' ? 'ì¹´ë©”ë¼ ê¶Œí•œ í—ˆìš©í•˜ê¸°' : 'Allow camera permission';
+  const topMission = mission || (language === 'ko' ? '오늘의 Mission' : "Today's Mission");
+  const permissionText = language === 'ko' ? '사진을 보내려면 카메라 권한이 필요해요.' : 'Camera permission is needed to send a photo.';
+  const permissionButtonText = language === 'ko' ? '카메라 권한 허용하기' : 'Allow camera permission';
 
   return (
     <Modal animationType="slide" onRequestClose={onClose} presentationStyle="fullScreen" visible={visible}>
@@ -966,7 +982,7 @@ function DaydropCameraModal({
             {permission.canAskAgain === false ? (
               <Pressable hitSlop={8} onPress={() => Linking.openSettings()}>
                 <Text allowFontScaling={false} style={styles.cameraSettingsText}>
-                  {language === 'ko' ? 'ì„¤ì • ì—´ê¸°' : 'Open Settings'}
+                  {language === 'ko' ? '설정 열기' : 'Open Settings'}
                 </Text>
               </Pressable>
             ) : null}
@@ -993,12 +1009,16 @@ function DaydropCameraModal({
                     }
                   }}
                   onCameraReady={() => {
-                    console.log('[DaydropCamera] ready', { facing });
+                    if (__DEV__) {
+                      console.log('[DaydropCamera] ready', { facing });
+                    }
                     setCameraReady(true);
                     if (facing === 'back') {
                       void cameraRef.current?.getAvailableLensesAsync().then(updateDefaultBackLens).catch(() => undefined);
                     }
-                    void logAvailablePictureSizes(cameraRef.current, facing);
+                    if (__DEV__) {
+                      void logAvailablePictureSizes(cameraRef.current, facing);
+                    }
                   }}
                   style={styles.cameraPreview}
                 />
@@ -1015,7 +1035,7 @@ function DaydropCameraModal({
                   }}
                   style={styles.cameraTextButton}>
                   <Text allowFontScaling={false} style={styles.cameraTextButtonLabel}>
-                    {language === 'ko' ? 'ë‹¤ì‹œ ì°ê¸°' : 'Retake'}
+                    {language === 'ko' ? '다시 찍기' : 'Retake'}
                   </Text>
                 </Pressable>
                 <Pressable disabled={submitting} onPress={usePhoto} style={[styles.cameraUseButton, submitting && styles.cameraControlDisabled]}>
@@ -1023,7 +1043,7 @@ function DaydropCameraModal({
                     <ActivityIndicator color="#111111" />
                   ) : (
                     <Text allowFontScaling={false} style={styles.cameraUseButtonText}>
-                      {language === 'ko' ? 'ì‚¬ì§„ ì‚¬ìš©' : 'Use Photo'}
+                      {language === 'ko' ? '사진 사용' : 'Use Photo'}
                     </Text>
                   )}
                 </Pressable>
@@ -1058,13 +1078,15 @@ async function logAvailablePictureSizes(camera: CameraView | null, facing: Camer
 
   try {
     const sizes = await camera.getAvailablePictureSizesAsync();
-    console.log('[DaydropCamera] available picture sizes', {
-      facing,
-      sizes,
-      selectedPictureSize: null,
-      applied: false,
-      reason: 'pictureSize changes capture ratio and can affect preview framing, so it is logged only',
-    });
+    if (__DEV__) {
+      console.log('[DaydropCamera] available picture sizes', {
+        facing,
+        sizes,
+        selectedPictureSize: null,
+        applied: false,
+        reason: 'pictureSize changes capture ratio and can affect preview framing, so it is logged only',
+      });
+    }
   } catch (error) {
     console.warn('[DaydropCamera] picture size lookup failed', { facing, error });
   }
@@ -1255,7 +1277,7 @@ function TodayDropPair({
 
   return (
     <>
-      <EmptySlot label={partnerLabel} icon="upload-cloud" message={language === 'ko' ? 'ì•„ì§ ë³´ë‚´ì§€ ì•Šì•˜ì–´ìš”' : 'Not sent yet'} tone="blue" side="left" />
+      <EmptySlot label={partnerLabel} icon="upload-cloud" message={language === 'ko' ? '아직 보내지 않았어요' : 'Not sent yet'} tone="blue" side="left" />
       <SendSlot label={myLabel} onPress={onUploadPress} t={t} />
     </>
   );
@@ -1979,7 +2001,7 @@ function TodayShareSheet({
                   </Text>
                 </View>
                 <Text allowFontScaling={false} style={styles.storyOrnament}>
-                  {'< - - -  âœ¦  - - - >'}
+                  {'< - - -  ✦  - - - >'}
                 </Text>
                 <View style={styles.storyPersonBlock}>
                   <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.68} numberOfLines={1} style={styles.storyName}>
@@ -2116,10 +2138,10 @@ function DetailPhoto({ image, label, locked, side }: { image?: string; label: st
 }
 
 function PermissionIntroModal({ language, onClose, visible }: { language: Language; onClose: () => void; visible: boolean }) {
-  const title = language === 'ko' ? 'ì¹´ë©”ë¼/ì‚¬ì§„ ê¶Œí•œ ì•ˆë‚´' : 'Camera & Photos';
+  const title = language === 'ko' ? '카메라/사진 권한 안내' : 'Camera & Photos';
   const body =
     language === 'ko'
-      ? 'ì‚¬ì§„ì„ ì°ê³  ê³µìœ í•˜ë ¤ë©´ ì¹´ë©”ë¼/ì‚¬ì§„ ê¶Œí•œì´ í•„ìš”í•´ìš”. ê¶Œí•œ ìš”ì²­ì€ ì‚¬ì§„ì„ ë³´ë‚´ê±°ë‚˜ ì°ì„ ë•Œë§Œ í‘œì‹œë©ë‹ˆë‹¤.'
+      ? '사진을 찍고 공유하려면 카메라/사진 권한이 필요해요. 권한 요청은 사진을 보내거나 찍을 때만 표시됩니다.'
       : 'Daydrop needs camera/photos access to take and share daily photos. The native permission prompt appears only when you send or take a photo.';
 
   return (
@@ -2135,7 +2157,7 @@ function PermissionIntroModal({ language, onClose, visible }: { language: Langua
           </Text>
           <Pressable onPress={onClose} style={styles.primaryButton}>
             <Text allowFontScaling={false} style={styles.primaryButtonText}>
-              {language === 'ko' ? 'í™•ì¸' : 'OK'}
+              {language === 'ko' ? '확인' : 'OK'}
             </Text>
           </Pressable>
         </View>
@@ -2183,27 +2205,27 @@ function SettingsSheet({
   const [requestingNotificationPermission, setRequestingNotificationPermission] = React.useState(false);
   const [clearingCache, setClearingCache] = React.useState(false);
   const languageLabel = language === 'ko' ? t.korean : t.english;
-  const accountSubtitle = language === 'ko' ? 'ì´ë¦„, êµ­ê°€, ë„ì‹œ, ì–¸ì–´' : 'Name, country, city, language';
+  const accountSubtitle = language === 'ko' ? '이름, 국가, 도시, 언어' : 'Name, country, city, language';
   const pushEnabled = notificationPreferences.pushEnabled;
   const notificationDisabledBySystem = notificationPermission === 'denied';
   const notificationStatusText = !pushEnabled
     ? language === 'ko'
-      ? 'êº¼ì§'
+      ? '꺼짐'
       : 'Off'
     : notificationPermission === 'granted'
       ? language === 'ko'
-        ? 'ì¼œì§'
+        ? '켜짐'
         : 'On'
       : notificationPermission === 'denied'
         ? language === 'ko'
-          ? 'ê¶Œí•œ í•„ìš”'
+          ? '권한 필요'
           : 'Needs permission'
         : notificationPermission === 'undetermined'
           ? language === 'ko'
-            ? 'ê¶Œí•œ í•„ìš”'
+            ? '권한 필요'
             : 'Needs permission'
           : language === 'ko'
-            ? 'í™•ì¸ ì¤‘'
+            ? '확인 중'
             : 'Checking';
   const activePartnerOptions = React.useMemo(
     () => getActivePartnerOptions(myCouple, profile.id),
@@ -2317,9 +2339,9 @@ function SettingsSheet({
     const partnerName = displayMemberName(partner, t.partner);
 
     Alert.alert(
-      language === 'ko' ? `${partnerName}ë‹˜ê³¼ì˜ ì—°ê²°ì„ í•´ì œí• ê¹Œìš”?` : `Disconnect from ${partnerName}?`,
+      language === 'ko' ? `${partnerName}님과의 연결을 해제할까요?` : `Disconnect from ${partnerName}?`,
       language === 'ko'
-        ? 'ì—°ê²°ì„ í•´ì œí•´ë„ ë‚´ ê³„ì •ê³¼ ë‚´ê°€ ì˜¬ë¦° ê¸°ë¡ì€ ìœ ì§€ë©ë‹ˆë‹¤.'
+        ? '연결을 해제해도 내 계정과 내가 올린 기록은 유지됩니다.'
         : 'Your account and the records you uploaded will be kept after disconnecting.',
       [
         { text: t.cancel, style: 'cancel' },
@@ -2350,7 +2372,7 @@ function SettingsSheet({
     }
 
     if (activePartnerOptions.length === 0) {
-      Alert.alert(t.disconnectPartner, language === 'ko' ? 'í˜„ìž¬ ì—°ê²°ëœ íŒŒíŠ¸ë„ˆê°€ ì—†ì–´ìš”.' : 'No partner is currently connected.');
+      Alert.alert(t.disconnectPartner, language === 'ko' ? '현재 연결된 파트너가 없어요.' : 'No partner is currently connected.');
       return;
     }
 
@@ -2398,8 +2420,8 @@ function SettingsSheet({
       console.warn('notification preferences save failed', error);
       setNotificationPreferences(notificationPreferences);
       Alert.alert(
-        language === 'ko' ? 'ì•Œë¦¼ ì„¤ì •' : 'Notification Settings',
-        language === 'ko' ? 'ì•Œë¦¼ ì„¤ì •ì„ ì €ìž¥í•˜ì§€ ëª»í–ˆì–´ìš”. ë‹¤ì‹œ ì‹œë„í•´ì£¼ì„¸ìš”.' : 'Could not save notification settings. Please try again.'
+        language === 'ko' ? '알림 설정' : 'Notification Settings',
+        language === 'ko' ? '알림 설정을 저장하지 못했어요. 다시 시도해주세요.' : 'Could not save notification settings. Please try again.'
       );
     }
   };
@@ -2409,7 +2431,7 @@ function SettingsSheet({
       await Linking.openSettings();
     } catch (error) {
       console.warn('open settings failed', error);
-      Alert.alert(language === 'ko' ? 'ì•Œë¦¼ ì„¤ì •' : 'Notification Settings', language === 'ko' ? 'ì„¤ì •ì„ ì—´ ìˆ˜ ì—†ì–´ìš”.' : 'Could not open Settings.');
+      Alert.alert(language === 'ko' ? '알림 설정' : 'Notification Settings', language === 'ko' ? '설정을 열 수 없어요.' : 'Could not open Settings.');
     }
   };
 
@@ -2436,11 +2458,11 @@ function SettingsSheet({
           }
         })
       );
-      Alert.alert(language === 'ko' ? 'ìºì‹œë¥¼ ì§€ì› ì–´ìš”.' : 'Cache cleared.');
+      Alert.alert(language === 'ko' ? '캐시를 지웠어요.' : 'Cache cleared.');
     } catch (error) {
       console.warn('clear cache failed', error);
       Alert.alert(
-        language === 'ko' ? 'ìºì‹œë¥¼ ì§€ìš°ì§€ ëª»í–ˆì–´ìš”. ë‹¤ì‹œ ì‹œë„í•´ì£¼ì„¸ìš”.' : 'Could not clear the cache. Please try again.'
+        language === 'ko' ? '캐시를 지우지 못했어요. 다시 시도해주세요.' : 'Could not clear the cache. Please try again.'
       );
     } finally {
       setClearingCache(false);
@@ -2453,14 +2475,14 @@ function SettingsSheet({
     }
 
     Alert.alert(
-      language === 'ko' ? 'ìºì‹œë¥¼ ì§€ìš¸ê¹Œìš”?' : 'Clear cache?',
+      language === 'ko' ? '캐시를 지울까요?' : 'Clear cache?',
       language === 'ko'
-        ? 'ì €ìž¥ëœ ìž„ì‹œ ì´ë¯¸ì§€ì™€ ìºì‹œê°€ ì‚­ì œë©ë‹ˆë‹¤. í•„ìš”í•œ ì‚¬ì§„ì€ ë‹¤ì‹œ ë¶ˆëŸ¬ì™€ì•¼ í•  ìˆ˜ ìžˆì–´ìš”.'
+        ? '저장된 임시 이미지와 캐시가 삭제됩니다. 필요한 사진은 다시 불러와야 할 수 있어요.'
         : 'Saved temporary images and cache will be deleted. Some photos may need to be loaded again.',
       [
-        { text: language === 'ko' ? 'ì·¨ì†Œ' : 'Cancel', style: 'cancel' },
+        { text: language === 'ko' ? '취소' : 'Cancel', style: 'cancel' },
         {
-          text: language === 'ko' ? 'ìºì‹œ ì§€ìš°ê¸°' : 'Clear Cache',
+          text: language === 'ko' ? '캐시 지우기' : 'Clear Cache',
           style: 'destructive',
           onPress: () => {
             void clearLocalCache();
@@ -2478,7 +2500,7 @@ function SettingsSheet({
       `Platform: ${Platform.OS} ${String(Platform.Version)}`,
       `Device: ${Device.modelName ?? 'unknown'}`,
       '',
-      language === 'ko' ? 'ë¬¸ì˜ ë‚´ìš©ì„ ìž‘ì„±í•´ì£¼ì„¸ìš”.' : 'Please describe your issue here.',
+      language === 'ko' ? '문의 내용을 작성해주세요.' : 'Please describe your issue here.',
     ].join('\n');
 
     const url = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
@@ -2491,27 +2513,27 @@ function SettingsSheet({
     } catch (error) {
       console.warn('open mail app failed', error);
       Alert.alert(
-        language === 'ko' ? 'ë¬¸ì˜ ì´ë©”ì¼' : 'Support Email',
+        language === 'ko' ? '문의 이메일' : 'Support Email',
         language === 'ko'
-          ? `ë©”ì¼ ì•±ì„ ì—´ ìˆ˜ ì—†ì–´ìš”.\n${SUPPORT_EMAIL}`
+          ? `메일 앱을 열 수 없어요.\n${SUPPORT_EMAIL}`
           : `Could not open the mail app.\n${SUPPORT_EMAIL}`
       );
     }
   };
 
   const handleOpenReportEmail = async () => {
-    const subject = '[Daydrop Report] ë¬¸ì œ ì‹ ê³ ';
+    const subject = '[Daydrop Report] 문제 신고';
     const body = [
-      'ì‹ ê³  ìœ í˜•:',
+      '신고 유형:',
       '',
-      '* ë¶ˆì¾Œí•œ ì‚¬ì§„',
-      '* ë©”ì‹œì§€ ë¬¸ì œ',
-      '* íŒŒíŠ¸ë„ˆ ì—°ê²° ë¬¸ì œ',
-      '* ê¸°íƒ€',
+      '* 불쾌한 사진',
+      '* 메시지 문제',
+      '* 파트너 연결 문제',
+      '* 기타',
       '',
-      'ë¬¸ì œ ë‚´ìš©:',
-      'ë°œìƒ ì‹œê°„:',
-      'ìƒëŒ€ ë‹‰ë„¤ìž„ ë˜ëŠ” ê³„ì • ì •ë³´:',
+      '문제 내용:',
+      '발생 시간:',
+      '상대 닉네임 또는 계정 정보:',
     ].join('\n');
 
     const url = `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
@@ -2524,9 +2546,9 @@ function SettingsSheet({
     } catch (error) {
       console.warn('open report mail app failed', error);
       Alert.alert(
-        language === 'ko' ? 'ë¬¸ì œ ì‹ ê³ ' : 'Report an Issue',
+        language === 'ko' ? '문제 신고' : 'Report an Issue',
         language === 'ko'
-          ? `ë©”ì¼ ì•±ì„ ì—´ ìˆ˜ ì—†ì–´ìš”.\n${SUPPORT_EMAIL}`
+          ? `메일 앱을 열 수 없어요.\n${SUPPORT_EMAIL}`
           : `Could not open the mail app.\n${SUPPORT_EMAIL}`
       );
     }
@@ -2538,9 +2560,9 @@ function SettingsSheet({
     } catch (error) {
       console.warn('open privacy policy failed', error);
       Alert.alert(
-        language === 'ko' ? 'ê°œì¸ì •ë³´ ì²˜ë¦¬ë°©ì¹¨' : 'Privacy Policy',
+        language === 'ko' ? '개인정보 처리방침' : 'Privacy Policy',
         language === 'ko'
-          ? `ë¸Œë¼ìš°ì €ë¥¼ ì—´ ìˆ˜ ì—†ì–´ìš”.\n${PRIVACY_POLICY_URL}`
+          ? `브라우저를 열 수 없어요.\n${PRIVACY_POLICY_URL}`
           : `Could not open the browser.\n${PRIVACY_POLICY_URL}`
       );
     }
@@ -2551,11 +2573,11 @@ function SettingsSheet({
       ? t.editProfile
       : mode === 'notifications'
         ? language === 'ko'
-          ? 'ì•Œë¦¼ ì„¤ì •'
+          ? '알림 설정'
           : 'Notification Settings'
         : mode === 'notices'
           ? language === 'ko'
-            ? 'ê³µì§€ì‚¬í•­'
+            ? '공지사항'
             : 'Notices'
         : mode === 'language'
           ? t.language
@@ -2623,7 +2645,7 @@ function SettingsSheet({
               <View style={styles.notificationIntro}>
                 <Text allowFontScaling={false} style={styles.notificationIntroText}>
                   {language === 'ko'
-                    ? 'Daydropì€ ì˜¤ëŠ˜ì˜ ì§ˆë¬¸, íŒŒíŠ¸ë„ˆì˜ ì‚¬ì§„ ì—…ë¡œë“œ, íŒŒíŠ¸ë„ˆ ì—°ê²° ì†Œì‹ì„ ì•Œë ¤ë“œë ¤ìš”.'
+                    ? 'Daydrop은 오늘의 질문, 파트너의 사진 업로드, 파트너 연결 소식을 알려드려요.'
                     : "Daydrop sends updates for today's question, partner photo uploads, and partner connections."}
                 </Text>
               </View>
@@ -2631,11 +2653,11 @@ function SettingsSheet({
               {notificationDisabledBySystem ? (
                 <View style={styles.notificationPermissionBox}>
                   <Text allowFontScaling={false} style={styles.notificationPermissionTitle}>
-                    {language === 'ko' ? 'iPhone ì„¤ì •ì—ì„œ Daydrop ì•Œë¦¼ì„ ì¼œì£¼ì„¸ìš”.' : 'Turn on Daydrop notifications in iPhone Settings.'}
+                    {language === 'ko' ? 'iPhone 설정에서 Daydrop 알림을 켜주세요.' : 'Turn on Daydrop notifications in iPhone Settings.'}
                   </Text>
                   <Pressable onPress={handleOpenNotificationSettings} style={styles.notificationSettingsButton}>
                     <Text allowFontScaling={false} style={styles.notificationSettingsButtonText}>
-                      {language === 'ko' ? 'ì„¤ì • ì—´ê¸°' : 'Open Settings'}
+                      {language === 'ko' ? '설정 열기' : 'Open Settings'}
                     </Text>
                   </Pressable>
                 </View>
@@ -2650,7 +2672,7 @@ function SettingsSheet({
                     <ActivityIndicator color="#111111" />
                   ) : (
                     <Text allowFontScaling={false} style={styles.notificationSettingsButtonText}>
-                      {language === 'ko' ? 'ì•Œë¦¼ ê¶Œí•œ í—ˆìš©í•˜ê¸°' : 'Allow Notifications'}
+                      {language === 'ko' ? '알림 권한 허용하기' : 'Allow Notifications'}
                     </Text>
                   )}
                 </Pressable>
@@ -2659,10 +2681,10 @@ function SettingsSheet({
               <SettingsSection title={language === 'ko' ? 'PUSH NOTIFICATIONS' : 'PUSH NOTIFICATIONS'}>
                 <NotificationToggleRow
                   disabled={loadingNotificationPreferences}
-                  title={language === 'ko' ? 'í‘¸ì‹œ ì•Œë¦¼' : 'Push Notifications'}
+                  title={language === 'ko' ? '푸시 알림' : 'Push Notifications'}
                   subtitle={
                     language === 'ko'
-                      ? 'Daydropì˜ ëª¨ë“  í‘¸ì‹œ ì•Œë¦¼ì„ ì¼œê±°ë‚˜ êº¼ìš”.'
+                      ? 'Daydrop의 모든 푸시 알림을 켜거나 꺼요.'
                       : 'Turn all Daydrop push notifications on or off.'
                   }
                   value={pushEnabled}
@@ -2670,10 +2692,10 @@ function SettingsSheet({
                 />
                 <NotificationToggleRow
                   disabled={!pushEnabled || loadingNotificationPreferences}
-                  title={language === 'ko' ? 'ì˜¤ëŠ˜ ì§ˆë¬¸ ì•Œë¦¼' : "Today's Question"}
+                  title={language === 'ko' ? '오늘 질문 알림' : "Today's Question"}
                   subtitle={
                     language === 'ko'
-                      ? 'ìƒˆë¡œìš´ ì˜¤ëŠ˜ì˜ ì§ˆë¬¸ì´ ì¤€ë¹„ë˜ë©´ ì•Œë ¤ë“œë ¤ìš”. ê¸°ê¸° ì‹œê°„ëŒ€ ê¸°ì¤€ ì˜¤í›„ 12ì‹œì— ë„ì°©í•´ìš”.'
+                      ? '새로운 오늘의 질문이 준비되면 알려드려요. 기기 시간대 기준 오후 12시에 도착해요.'
                       : "Get notified when today's question is ready. It arrives at 12:00 PM in your device timezone."
                   }
                   value={notificationPreferences.dailyQuestion}
@@ -2681,10 +2703,10 @@ function SettingsSheet({
                 />
                 <NotificationToggleRow
                   disabled={!pushEnabled || loadingNotificationPreferences}
-                  title={language === 'ko' ? 'íŒŒíŠ¸ë„ˆ ì‚¬ì§„ ì—…ë¡œë“œ ì•Œë¦¼' : 'Partner Photo Uploads'}
+                  title={language === 'ko' ? '파트너 사진 업로드 알림' : 'Partner Photo Uploads'}
                   subtitle={
                     language === 'ko'
-                      ? 'íŒŒíŠ¸ë„ˆê°€ ì˜¤ëŠ˜ì˜ ì‚¬ì§„ì„ ì˜¬ë¦¬ë©´ ì•Œë ¤ë“œë ¤ìš”.'
+                      ? '파트너가 오늘의 사진을 올리면 알려드려요.'
                       : "Get notified when your partner uploads today's photo."
                   }
                   value={notificationPreferences.partnerPhotoUploaded}
@@ -2693,10 +2715,10 @@ function SettingsSheet({
                 <NotificationToggleRow
                   disabled={!pushEnabled || loadingNotificationPreferences}
                   showDivider={false}
-                  title={language === 'ko' ? 'íŒŒíŠ¸ë„ˆ ì—°ê²° ì•Œë¦¼' : 'Partner Connections'}
+                  title={language === 'ko' ? '파트너 연결 알림' : 'Partner Connections'}
                   subtitle={
                     language === 'ko'
-                      ? 'ìƒˆ íŒŒíŠ¸ë„ˆ ì—°ê²°ì´ ì™„ë£Œë˜ë©´ ì•Œë ¤ë“œë ¤ìš”.'
+                      ? '새 파트너 연결이 완료되면 알려드려요.'
                       : 'Get notified when a new partner connection is complete.'
                   }
                   value={notificationPreferences.partnerConnected}
@@ -2706,7 +2728,7 @@ function SettingsSheet({
 
               {!pushEnabled ? (
                 <Text allowFontScaling={false} style={styles.notificationMutedHint}>
-                  {language === 'ko' ? 'í‘¸ì‹œ ì•Œë¦¼ì´ êº¼ì ¸ ìžˆì–´ í•˜ìœ„ ì•Œë¦¼ë„ ë¹„í™œì„±í™”ë˜ì–´ ìžˆì–´ìš”.' : 'Push notifications are off, so the options below are disabled.'}
+                  {language === 'ko' ? '푸시 알림이 꺼져 있어 하위 알림도 비활성화되어 있어요.' : 'Push notifications are off, so the options below are disabled.'}
                 </Text>
               ) : null}
             </View>
@@ -2717,21 +2739,21 @@ function SettingsSheet({
               </Text>
               <Text allowFontScaling={false} style={styles.privacyText}>
                 {language === 'ko'
-                  ? 'ì•± ì—…ë°ì´íŠ¸, ì ê²€ ì•ˆë‚´, ì¤‘ìš”í•œ ë³€ê²½ ì‚¬í•­ì„ ì´ê³³ì—ì„œ í™•ì¸í•  ìˆ˜ ìžˆì–´ìš”.'
+                  ? '앱 업데이트, 점검 안내, 중요한 변경 사항을 이곳에서 확인할 수 있어요.'
                   : 'App updates, maintenance notices, and important changes will appear here.'}
               </Text>
               <Text allowFontScaling={false} style={styles.privacyHint}>
-                {language === 'ko' ? 'í˜„ìž¬ ë“±ë¡ëœ ê³µì§€ì‚¬í•­ì€ ì—†ì–´ìš”.' : 'There are no notices right now.'}
+                {language === 'ko' ? '현재 등록된 공지사항은 없어요.' : 'There are no notices right now.'}
               </Text>
             </View>
           ) : mode === 'disconnectPartner' ? (
             <View style={styles.settingsDetail}>
               <Text allowFontScaling={false} style={styles.deleteTitle}>
-                {language === 'ko' ? 'ì—°ê²° í•´ì œí•  íŒŒíŠ¸ë„ˆë¥¼ ì„ íƒí•´ì£¼ì„¸ìš”.' : 'Choose a partner to disconnect.'}
+                {language === 'ko' ? '연결 해제할 파트너를 선택해주세요.' : 'Choose a partner to disconnect.'}
               </Text>
               <Text allowFontScaling={false} style={styles.privacyText}>
                 {language === 'ko'
-                  ? 'ì„ íƒí•œ íŒŒíŠ¸ë„ˆ 1ëª…ê³¼ì˜ ì—°ê²°ë§Œ í•´ì œë©ë‹ˆë‹¤.'
+                  ? '선택한 파트너 1명과의 연결만 해제됩니다.'
                   : 'Only the selected partner connection will be disconnected.'}
               </Text>
               <View style={styles.settingsList}>
@@ -2747,8 +2769,8 @@ function SettingsSheet({
                       danger
                       icon="user-minus"
                       title={name}
-                      subtitle={[relationship, location].filter(Boolean).join(' Â· ')}
-                      rightValue={disconnectingPartner ? (language === 'ko' ? 'ì²˜ë¦¬ ì¤‘' : 'Working') : undefined}
+                      subtitle={[relationship, location].filter(Boolean).join(' · ')}
+                      rightValue={disconnectingPartner ? (language === 'ko' ? '처리 중' : 'Working') : undefined}
                       onPress={() => confirmDisconnectPartner(option)}
                       showDivider={index < activePartnerOptions.length - 1}
                     />
@@ -2771,7 +2793,7 @@ function SettingsSheet({
               </Text>
               <Pressable onPress={() => setMode('deleteFinal')} style={styles.dangerButton}>
                 <Text allowFontScaling={false} style={styles.logoutText}>
-                  {language === 'ko' ? 'ê³„ì†' : 'Continue'}
+                  {language === 'ko' ? '계속' : 'Continue'}
                 </Text>
               </Pressable>
               <Pressable onPress={() => setMode('menu')} style={styles.outlineButton}>
@@ -2830,14 +2852,14 @@ function SettingsSheet({
                 <SettingsRow icon="globe" title={t.language} rightValue={languageLabel} onPress={() => setMode('language')} />
                 <SettingsRow
                   icon="bell"
-                  title={language === 'ko' ? 'ì•Œë¦¼ ì„¤ì •' : 'Notification Settings'}
+                  title={language === 'ko' ? '알림 설정' : 'Notification Settings'}
                   rightValue={notificationStatusText}
                   onPress={() => setMode('notifications')}
                 />
                 <SettingsRow
                   icon="trash-2"
-                  title={language === 'ko' ? 'ìºì‹œ ì§€ìš°ê¸°' : 'Clear Cache'}
-                  rightValue={clearingCache ? (language === 'ko' ? 'ì •ë¦¬ ì¤‘' : 'Clearing') : undefined}
+                  title={language === 'ko' ? '캐시 지우기' : 'Clear Cache'}
+                  rightValue={clearingCache ? (language === 'ko' ? '정리 중' : 'Clearing') : undefined}
                   onPress={handleClearCache}
                   showDivider={false}
                 />
@@ -2846,12 +2868,12 @@ function SettingsSheet({
               <SettingsSection title="Support">
                 <SettingsRow
                   icon="volume-2"
-                  title={language === 'ko' ? 'ê³µì§€ì‚¬í•­' : 'Notices'}
+                  title={language === 'ko' ? '공지사항' : 'Notices'}
                   onPress={() => setMode('notices')}
                 />
                 <SettingsRow
                   icon="mail"
-                  title={language === 'ko' ? 'ë¬¸ì˜ / ì§€ì›' : 'Contact / Support'}
+                  title={language === 'ko' ? '문의 / 지원' : 'Contact / Support'}
                   onPress={handleOpenSupportEmail}
                 />
                 <SettingsRow icon="shield" title={t.privacyPolicy} onPress={openPrivacyPolicy} showDivider={false} />
@@ -2863,7 +2885,7 @@ function SettingsSheet({
                   icon="user-minus"
                   title={t.disconnectPartner}
                   subtitle={t.disconnectPartnerBody}
-                  rightValue={disconnectingPartner ? (language === 'ko' ? 'ì²˜ë¦¬ ì¤‘' : 'Working') : undefined}
+                  rightValue={disconnectingPartner ? (language === 'ko' ? '처리 중' : 'Working') : undefined}
                   onPress={handleDisconnectPartner}
                 />
                 <SettingsRow
@@ -3221,7 +3243,7 @@ async function shareStoryFileFallback(uri: string, language: Language) {
   const isAvailable = await Sharing.isAvailableAsync();
   if (isAvailable) {
     await Sharing.shareAsync(uri, {
-      dialogTitle: language === 'ko' ? 'ê³µìœ í•˜ê¸°' : 'Share',
+      dialogTitle: language === 'ko' ? '공유하기' : 'Share',
       mimeType: 'image/png',
       UTI: 'public.png',
     });
@@ -3229,7 +3251,7 @@ async function shareStoryFileFallback(uri: string, language: Language) {
   }
 
   await Share.share({
-    message: language === 'ko' ? 'Daydrop ìŠ¤í† ë¦¬ ì´ë¯¸ì§€' : 'Daydrop story image',
+    message: language === 'ko' ? 'Daydrop 스토리 이미지' : 'Daydrop story image',
     url: uri,
   });
 }
@@ -3262,7 +3284,7 @@ function calculateImageHeight(slotWidth: number, size: ImageSize | null, fallbac
 
 function isDeleteConfirmText(value: string) {
   const normalized = value.trim();
-  return normalized === 'DELETE' || normalized === 'ì‚­ì œ' || normalized === 'Ã¬â€šÂ­Ã¬Â Å“';
+  return normalized === 'DELETE' || normalized === '삭제' || normalized === '삭제';
 }
 
 function LanguageButton({ active, disabled, label, onPress }: { active: boolean; disabled: boolean; label: string; onPress: () => void }) {
@@ -3315,7 +3337,7 @@ function AuthScreen({ language }: { language: Language }) {
     authSubmittingRef.current = true;
     if (!email.trim() || password.length < 6) {
       authSubmittingRef.current = false;
-      Alert.alert(t.confirm, language === 'ko' ? 'ì´ë©”ì¼ê³¼ 6ìžë¦¬ ì´ìƒì˜ ë¹„ë°€ë²ˆí˜¸ê°€ í•„ìš”í•´ìš”.' : 'Email and a password of at least 6 characters are required.');
+      Alert.alert(t.confirm, language === 'ko' ? '이메일과 6자리 이상의 비밀번호가 필요해요.' : 'Email and a password of at least 6 characters are required.');
       return;
     }
 
@@ -3368,13 +3390,13 @@ function AuthScreen({ language }: { language: Language }) {
         throw new Error('missing_apple_identity_token');
       }
 
-      await signInWithAppleIdToken(credential.identityToken);
+      await signInWithAppleIdToken(credential.identityToken, credential.fullName);
     } catch (error) {
       if (isAppleAuthCanceled(error)) {
         return;
       }
 
-      console.error('apple sign-in failed', error);
+      console.error('Apple login error', error);
       Alert.alert(t.socialSignInFailed, t.tryAgain);
     } finally {
       authSubmittingRef.current = false;
@@ -3439,7 +3461,7 @@ function AuthScreen({ language }: { language: Language }) {
           </View>
           <Pressable disabled={isSubmitting} onPress={() => router.push({ pathname: '/signup', params: { language } })} style={styles.authLinkWrap}>
             <Text allowFontScaling={false} style={styles.secondaryAction}>
-              {language === 'ko' ? 'ê³„ì • ë§Œë“¤ê¸°' : 'Create account'}
+              {language === 'ko' ? '계정 만들기' : 'Create account'}
             </Text>
           </Pressable>
         </ScrollView>
@@ -3709,13 +3731,13 @@ function CoupleConnectScreen({
     });
     const message =
       language === 'ko'
-        ? `${displayName}ë‹˜ì´ Daydropì— ${label}ë¡œ ì´ˆëŒ€í–ˆì–´ìš”.\nì´ˆëŒ€ ì½”ë“œ: ${createdCode}\nDaydropì—ì„œ ì½”ë“œë¥¼ ìž…ë ¥í•˜ë©´ ë°”ë¡œ ì—°ê²°ë¼ìš”.`
+        ? `${displayName}님이 Daydrop에 ${label}로 초대했어요.\n초대 코드: ${createdCode}\nDaydrop에서 코드를 입력하면 바로 연결돼요.`
         : `${displayName} invited you to Daydrop as ${label}.\nInvite code: ${createdCode}\nEnter this code in Daydrop to connect.`;
 
     try {
       await Share.share({
         message: `${message}\n${inviteUrl}`,
-        title: language === 'ko' ? 'Daydrop ì´ˆëŒ€' : 'Daydrop Invite',
+        title: language === 'ko' ? 'Daydrop 초대' : 'Daydrop Invite',
       });
     } catch (error) {
       console.error('share invite failed', error);
@@ -3792,7 +3814,7 @@ function CoupleConnectScreen({
                 {t.profile}
               </Text>
               <Text allowFontScaling={false} numberOfLines={1} style={styles.connectProfileValue}>
-                {[displayName, formatLocationValue(profile.city, profile.country, language)].filter(Boolean).join(' Â· ')}
+                {[displayName, formatLocationValue(profile.city, profile.country, language)].filter(Boolean).join(' · ')}
               </Text>
             </View>
           </View>
@@ -3816,7 +3838,7 @@ function CoupleConnectScreen({
                 <Pressable disabled={loading} onPress={shareInvite} style={[styles.inviteActionButton, loading && styles.disabledButton]}>
                   <Feather name="share-2" size={18} color="#111111" style={styles.inviteActionIcon} />
                   <Text allowFontScaling={false} style={styles.inviteActionText}>
-                    {language === 'ko' ? 'ì´ˆëŒ€ ê³µìœ í•˜ê¸°' : 'Share invite'}
+                    {language === 'ko' ? '초대 공유하기' : 'Share invite'}
                   </Text>
                 </Pressable>
                 <Pressable
@@ -3828,7 +3850,7 @@ function CoupleConnectScreen({
                   style={[styles.inviteActionButton, loading && styles.disabledButton]}>
                   <Feather name="copy" size={18} color="#111111" style={styles.inviteActionIcon} />
                   <Text allowFontScaling={false} style={styles.inviteActionText}>
-                    {language === 'ko' ? 'ë³µì‚¬í•˜ê¸°' : 'Copy'}
+                    {language === 'ko' ? '복사하기' : 'Copy'}
                   </Text>
                 </Pressable>
               </View>
@@ -3849,11 +3871,11 @@ function CoupleConnectScreen({
             </>
           )}
 
-          {pending ? <InlineMessage text={language === 'ko' ? 'ì´ˆëŒ€í•œ ì‚¬ëžŒì´ ì½”ë“œë¥¼ ìž…ë ¥í•˜ë©´ ì—°ê²°ë¼ìš”.' : 'Share the code so your person can connect.'} /> : null}
+          {pending ? <InlineMessage text={language === 'ko' ? '초대한 사람이 코드를 입력하면 연결돼요.' : 'Share the code so your person can connect.'} /> : null}
 
           <View style={styles.joinSection}>
             <Text allowFontScaling={false} style={styles.joinLabel}>
-              {language === 'ko' ? 'ë°›ì€ ì½”ë“œê°€ ìžˆë‚˜ìš”?' : 'Have an invite code?'}
+              {language === 'ko' ? '받은 코드가 있나요?' : 'Have an invite code?'}
             </Text>
             <TextInput
               autoCapitalize="characters"
@@ -3877,10 +3899,10 @@ function CoupleConnectScreen({
 
 function getConnectTitle(partnerType: PartnerType | null, language: Language) {
   if (partnerType === 'friend') {
-    return language === 'ko' ? 'ì¹œêµ¬ì™€ Daydropì„ ì‹œìž‘í•´ë³´ì„¸ìš”.' : 'Start Daydrop with a friend.';
+    return language === 'ko' ? '친구와 Daydrop을 시작해보세요.' : 'Start Daydrop with a friend.';
   }
 
-  return language === 'ko' ? 'ë‘˜ë§Œì˜ Daydropì„ ì‹œìž‘í•´ë³´ì„¸ìš”.' : 'Start your private Daydrop.';
+  return language === 'ko' ? '둘만의 Daydrop을 시작해보세요.' : 'Start your private Daydrop.';
 }
 
 function normalizeInviteCode(value: unknown) {
@@ -3919,12 +3941,12 @@ function getInviteCodeFromURL(url: string | null) {
 function getConnectBody(partnerType: PartnerType | null, language: Language) {
   if (partnerType === 'friend') {
     return language === 'ko'
-      ? 'ì´ˆëŒ€ ì½”ë“œë¥¼ ê³µìœ í•˜ë©´ ì¹œêµ¬ì™€ ê°™ì€ Missionì„ ì—´ê³  ì„œë¡œì˜ í•˜ë£¨ë¥¼ ë³¼ ìˆ˜ ìžˆì–´ìš”.'
+      ? '초대 코드를 공유하면 친구와 같은 Mission을 열고 서로의 하루를 볼 수 있어요.'
       : 'Share an invite code to open the same Mission and see each other\'s day.';
   }
 
   return language === 'ko'
-    ? 'í•œ ëª…ì´ ì´ˆëŒ€ ì½”ë“œë¥¼ ë§Œë“¤ê³ , ë‹¤ë¥¸ í•œ ëª…ì´ ê·¸ ì½”ë“œë¥¼ ìž…ë ¥í•˜ë©´ ì˜¤ëŠ˜ì˜ Missionì´ ì—´ë ¤ìš”.'
+    ? '한 명이 초대 코드를 만들고, 다른 한 명이 그 코드를 입력하면 오늘의 Mission이 열려요.'
     : 'One of you creates an invite code. The other enters it to open today\'s Mission.';
 }
 
@@ -3999,6 +4021,16 @@ function CenteredState({ text }: { text: string }) {
   );
 }
 
+function AppLoadingScreen() {
+  return (
+    <SafeAreaView style={styles.appLoadingScreen}>
+      <Text allowFontScaling={false} style={styles.appLoadingLogo}>
+        DAYDROP
+      </Text>
+    </SafeAreaView>
+  );
+}
+
 function InlineMessage({ text }: { text: string }) {
   return (
     <Text allowFontScaling={false} style={styles.inlineMessage}>
@@ -4059,7 +4091,7 @@ function buildMeta(members: SplitMembers, language: Language, t: Copy) {
   if (!members.partner) {
     return myLocation;
   }
-  return `${partnerLocation} â†” ${myLocation}`;
+  return `${partnerLocation} ↔ ${myLocation}`;
 }
 function formatLocation(member: CoupleMember | null, language: Language, fallback: string) {
   return formatLocationValue(member?.city, member?.country, language) || fallback;
@@ -4067,7 +4099,7 @@ function formatLocation(member: CoupleMember | null, language: Language, fallbac
 
 function getMissionPrompt(mission: Pick<TodayDropPayload['mission'], 'prompt_ko' | 'prompt_en'> | null | undefined, language: Language) {
   if (!mission) {
-    return language === 'ko' ? 'ì˜¤ëŠ˜ì˜ Mission' : "Today's Mission";
+    return language === 'ko' ? '오늘의 Mission' : "Today's Mission";
   }
   return language === 'en' ? mission.prompt_en || mission.prompt_ko : mission.prompt_ko || mission.prompt_en || "Today's Mission";
 }
@@ -4101,6 +4133,19 @@ function sideRadius(side: 'left' | 'right') {
 }
 
 const styles = StyleSheet.create({
+  appLoadingScreen: {
+    alignItems: 'center',
+    backgroundColor: '#000000',
+    flex: 1,
+    justifyContent: 'center',
+  },
+  appLoadingLogo: {
+    color: '#FFFFFF',
+    fontSize: 23,
+    fontWeight: '800',
+    letterSpacing: 9,
+    paddingLeft: 9,
+  },
   safeArea: {
     backgroundColor: '#FFFCF7',
     flex: 1,
@@ -4298,6 +4343,9 @@ const styles = StyleSheet.create({
     zIndex: 1,
   },
   missionHeaderTitle: {
+    color: '#333333',
+    fontSize: 21,
+    fontWeight: '700',
     marginBottom: 0,
   },
   partnerPill: {
@@ -4425,10 +4473,10 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   missionTitle: {
-    color: '#050505',
-    fontSize: 22,
-    fontWeight: '800',
-    lineHeight: 30,
+    color: '#111111',
+    fontSize: 18,
+    fontWeight: '700',
+    lineHeight: 24,
     marginBottom: 6,
   },
   missionMeta: {
@@ -4693,9 +4741,9 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   recentTitle: {
-    color: '#050505',
-    fontSize: 22,
-    fontWeight: '800',
+    color: '#333333',
+    fontSize: 20,
+    fontWeight: '700',
   },
   viewAll: {
     alignItems: 'center',

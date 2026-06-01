@@ -17,10 +17,11 @@ type PrefetchImage = {
 
 const RECENT_PREFETCH_DROP_LIMIT = 4;
 const REALTIME_REFETCH_DEBOUNCE_MS = 1200;
+const IMAGE_PREFETCH_TIMEOUT_MS = 1200;
 const prefetchedImageKeys = new Set<string>();
 const prefetchingImageKeys = new Set<string>();
 
-export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null) {
+export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null) {
   const [today, setToday] = React.useState<TodayDropPayload | null>(null);
   const [recentDrops, setRecentDrops] = React.useState<RecentDrop[]>([]);
   const [loading, setLoading] = React.useState(false);
@@ -57,11 +58,10 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null)
         try {
           const nextToday = await getOrCreateTodayDrop();
           setToday((current) => (areTodayImageUrlsEqual(current, nextToday) ? current : nextToday));
-          prefetchDropImageUrls(collectTodayImageUrls(nextToday));
 
           const nextRecentDrops = await getRecentDrops(nextToday.daily_drop.couple_id);
           setRecentDrops((current) => (areRecentImageUrlsEqual(current, nextRecentDrops) ? current : nextRecentDrops));
-          prefetchDropImageUrls(collectRecentImageUrls(nextRecentDrops));
+          await prefetchDropImageUrls([...collectTodayImageUrls(nextToday), ...collectRecentImageUrls(nextRecentDrops)], isRefresh ? 0 : IMAGE_PREFETCH_TIMEOUT_MS);
           return {
             recentDrops: nextRecentDrops,
             today: nextToday,
@@ -80,8 +80,24 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null)
       refetchInFlightRef.current = nextRefetch;
       return nextRefetch;
     },
-    [enabled, selectedCoupleId]
+    [enabled]
   );
+
+  const applyLocalSubmission = React.useCallback((submission: DropSubmission) => {
+    setToday((current) => {
+      if (!current || current.daily_drop.id !== submission.drop_id) {
+        return current;
+      }
+
+      const withoutMine = current.submissions.filter((nextSubmission) => nextSubmission.user_id !== submission.user_id);
+      const nextToday = {
+        ...current,
+        submissions: [...withoutMine, submission],
+      };
+      void prefetchDropImageUrls(collectTodayImageUrls(nextToday), 0);
+      return nextToday;
+    });
+  }, []);
 
   const scheduleRealtimeRefetch = React.useCallback(() => {
     if (Date.now() - lastExplicitRefreshAtRef.current < REALTIME_REFETCH_DEBOUNCE_MS) {
@@ -144,6 +160,7 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null)
     loading,
     refreshing,
     error,
+    applyLocalSubmission,
     refetch,
   };
 }
@@ -168,7 +185,7 @@ function collectSubmissionImages(submissions: DropSubmission[]): PrefetchImage[]
   }, []);
 }
 
-function prefetchDropImageUrls(images: PrefetchImage[]) {
+async function prefetchDropImageUrls(images: PrefetchImage[], timeoutMs: number) {
   const imageByKey = new Map(images.map((image) => [image.key, image.url]));
   const nextImages = [...imageByKey.entries()].filter(([key]) => !prefetchedImageKeys.has(key) && !prefetchingImageKeys.has(key));
   if (nextImages.length === 0) {
@@ -177,7 +194,7 @@ function prefetchDropImageUrls(images: PrefetchImage[]) {
 
   nextImages.forEach(([key]) => prefetchingImageKeys.add(key));
 
-  ExpoImage.prefetch(
+  const prefetch = ExpoImage.prefetch(
     nextImages.map(([, url]) => url),
     'memory-disk'
   )
@@ -192,6 +209,13 @@ function prefetchDropImageUrls(images: PrefetchImage[]) {
     .finally(() => {
       nextImages.forEach(([key]) => prefetchingImageKeys.delete(key));
     });
+
+  if (timeoutMs <= 0) {
+    void prefetch;
+    return;
+  }
+
+  await Promise.race([prefetch, wait(timeoutMs)]);
 }
 
 function areTodayImageUrlsEqual(current: TodayDropPayload | null, next: TodayDropPayload) {
@@ -223,4 +247,8 @@ function areSubmissionImageUrlsEqual(current: DropSubmission[], next: DropSubmis
 
 function isNonEmptyString(value: string | null | undefined): value is string {
   return Boolean(value?.trim());
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

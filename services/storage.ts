@@ -115,20 +115,22 @@ async function normalizePickedImage(
     source === 'front' && options.flipFrontCameraByDefault && !alreadyMirrorNormalized && !hasMirroredExif;
   const mirrorMode: MirrorMode = shouldFlip ? 'front-preview-match' : hasMirroredExif ? 'exif-mirrored' : 'none';
 
-  console.log('[photo] picked image', {
-    source,
-    captureSource: source,
-    uri: asset.uri,
-    width: asset.width,
-    height: asset.height,
-    base64Used: Boolean(asset.base64),
-    exifOrientation: orientation,
-    mirrorMode,
-    resizeApplied: false,
-    compressApplied: false,
-    reencodeApplied: false,
-    flipApplied: shouldFlip,
-  });
+  if (__DEV__) {
+    console.log('[photo] picked image', {
+      source,
+      captureSource: source,
+      uri: asset.uri,
+      width: asset.width,
+      height: asset.height,
+      base64Used: Boolean(asset.base64),
+      exifOrientation: orientation,
+      mirrorMode,
+      resizeApplied: false,
+      compressApplied: false,
+      reencodeApplied: false,
+      flipApplied: shouldFlip,
+    });
+  }
 
   if (!shouldFlip) {
     return {
@@ -174,22 +176,24 @@ async function normalizePickedImage(
     uploadUri: saved.uri,
   };
 
-  console.log('[photo] normalized image', {
-    source,
-    captureSource: source,
-    capturedUri: asset.uri,
-    uri: normalized.uri,
-    originalWidth: asset.width,
-    originalHeight: asset.height,
-    width: normalized.width,
-    height: normalized.height,
-    base64Used: Boolean(normalized.base64),
-    exifOrientation: normalized.exif?.Orientation ?? null,
-    resizeApplied: normalized.resized,
-    compressApplied: false,
-    reencodeApplied: normalized.reencoded,
-    flipApplied: shouldFlip,
-  });
+  if (__DEV__) {
+    console.log('[photo] normalized image', {
+      source,
+      captureSource: source,
+      capturedUri: asset.uri,
+      uri: normalized.uri,
+      originalWidth: asset.width,
+      originalHeight: asset.height,
+      width: normalized.width,
+      height: normalized.height,
+      base64Used: Boolean(normalized.base64),
+      exifOrientation: normalized.exif?.Orientation ?? null,
+      resizeApplied: normalized.resized,
+      compressApplied: false,
+      reencodeApplied: normalized.reencoded,
+      flipApplied: shouldFlip,
+    });
+  }
 
   return normalized;
 }
@@ -273,20 +277,22 @@ export async function uploadDropImage({
   const uploadResizeApplied = uploadTransform?.resizeApplied ?? false;
   const uploadReencodeApplied = uploadTransform?.reencodeApplied ?? false;
 
-  console.log('[photo] upload candidate', {
-    capturedUri: fileInfo?.capturedUri ?? finalUploadUri,
-    uploadUri: finalUploadUri,
-    originalWidth: fileInfo?.originalWidth ?? fileInfo?.width ?? null,
-    originalHeight: fileInfo?.originalHeight ?? fileInfo?.height ?? null,
-    uploadWidth: finalUploadWidth,
-    uploadHeight: finalUploadHeight,
-    base64Used,
-    compressApplied: uploadCompressApplied,
-    resizeApplied: uploadResizeApplied,
-    reencodeApplied: uploadReencodeApplied,
-    fileSize: uploadFileSize,
-    byteLength: uploadData.byteLength,
-  });
+  if (__DEV__) {
+    console.log('[photo] upload candidate', {
+      capturedUri: fileInfo?.capturedUri ?? finalUploadUri,
+      uploadUri: finalUploadUri,
+      originalWidth: fileInfo?.originalWidth ?? fileInfo?.width ?? null,
+      originalHeight: fileInfo?.originalHeight ?? fileInfo?.height ?? null,
+      uploadWidth: finalUploadWidth,
+      uploadHeight: finalUploadHeight,
+      base64Used,
+      compressApplied: uploadCompressApplied,
+      resizeApplied: uploadResizeApplied,
+      reencodeApplied: uploadReencodeApplied,
+      fileSize: uploadFileSize,
+      byteLength: uploadData.byteLength,
+    });
+  }
 
   const { error } = await supabase.storage.from(DROP_PHOTOS_BUCKET).upload(storagePath, uploadData, {
     contentType: 'image/jpeg',
@@ -297,17 +303,19 @@ export async function uploadDropImage({
     throw error;
   }
 
-  console.log('[photo] uploaded image', {
-    bucket: DROP_PHOTOS_BUCKET,
-    storagePath,
-    contentType: 'image/jpeg',
-    byteLength: uploadData.byteLength,
-    uploadWidth: finalUploadWidth,
-    uploadHeight: finalUploadHeight,
-    compressApplied: uploadCompressApplied,
-    resizeApplied: uploadResizeApplied,
-    reencodeApplied: uploadReencodeApplied,
-  });
+  if (__DEV__) {
+    console.log('[photo] uploaded image', {
+      bucket: DROP_PHOTOS_BUCKET,
+      storagePath,
+      contentType: 'image/jpeg',
+      byteLength: uploadData.byteLength,
+      uploadWidth: finalUploadWidth,
+      uploadHeight: finalUploadHeight,
+      compressApplied: uploadCompressApplied,
+      resizeApplied: uploadResizeApplied,
+      reencodeApplied: uploadReencodeApplied,
+    });
+  }
 
   return {
     storagePath,

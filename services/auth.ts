@@ -55,7 +55,16 @@ export async function signInWithGoogle() {
   return true;
 }
 
-export async function signInWithAppleIdToken(identityToken: string) {
+export type AppleAuthFullName = {
+  namePrefix?: string | null;
+  givenName?: string | null;
+  middleName?: string | null;
+  familyName?: string | null;
+  nameSuffix?: string | null;
+  nickname?: string | null;
+};
+
+export async function signInWithAppleIdToken(identityToken: string, fullName?: AppleAuthFullName | null) {
   const { data, error } = await supabase.auth.signInWithIdToken({
     provider: 'apple',
     token: identityToken,
@@ -64,6 +73,8 @@ export async function signInWithAppleIdToken(identityToken: string) {
   if (error) {
     throw error;
   }
+
+  await saveAppleFullName(data.user?.id, data.user?.user_metadata, fullName);
 
   return data;
 }
@@ -205,4 +216,69 @@ async function completeOAuthSession(url: string) {
   if (error) {
     throw error;
   }
+}
+
+async function saveAppleFullName(userId?: string, currentMetadata?: Record<string, unknown>, fullName?: AppleAuthFullName | null) {
+  const displayName = formatAppleFullName(fullName);
+  if (!userId || !displayName) {
+    return;
+  }
+
+  const appleFullName = compactObject({
+    familyName: fullName?.familyName,
+    givenName: fullName?.givenName,
+    middleName: fullName?.middleName,
+    namePrefix: fullName?.namePrefix,
+    nameSuffix: fullName?.nameSuffix,
+    nickname: fullName?.nickname,
+  });
+
+  const { error: metadataError } = await supabase.auth.updateUser({
+    data: {
+      ...(currentMetadata ?? {}),
+      apple_full_name: appleFullName,
+      display_name: displayName,
+      full_name: displayName,
+    },
+  });
+
+  if (metadataError) {
+    throw metadataError;
+  }
+
+  const { data: profile, error: profileLookupError } = await supabase.from('profiles').select('display_name').eq('id', userId).maybeSingle();
+
+  if (profileLookupError) {
+    throw profileLookupError;
+  }
+
+  if (profile?.display_name?.trim()) {
+    return;
+  }
+
+  const { error: profileError } = await supabase
+    .from('profiles')
+    .upsert(
+      {
+        display_name: displayName,
+        id: userId,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'id' }
+    );
+
+  if (profileError) {
+    throw profileError;
+  }
+}
+
+function formatAppleFullName(fullName?: AppleAuthFullName | null) {
+  return [fullName?.namePrefix, fullName?.givenName, fullName?.middleName, fullName?.familyName, fullName?.nameSuffix]
+    .map((part) => part?.trim())
+    .filter(Boolean)
+    .join(' ');
+}
+
+function compactObject<T extends Record<string, string | null | undefined>>(value: T) {
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => Boolean(entry[1]?.trim())));
 }

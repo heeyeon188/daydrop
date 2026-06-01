@@ -17,11 +17,13 @@ export async function getOrCreateTodayDrop(): Promise<TodayDropPayload> {
     throw error;
   }
   const payload = data as TodayDropPayload;
-  console.log('[today_drop] selected mission', {
-    coupleId: payload.daily_drop.couple_id,
-    missionType: payload.mission?.mission_type ?? null,
-    relationshipType: payload.couple?.partner_type ?? null,
-  });
+  if (__DEV__) {
+    console.log('[today_drop] selected mission', {
+      coupleId: payload.daily_drop.couple_id,
+      missionType: payload.mission?.mission_type ?? null,
+      relationshipType: payload.couple?.partner_type ?? null,
+    });
+  }
   return signTodayPhotoUrls(payload);
 }
 
@@ -56,12 +58,14 @@ export async function submitDropPhoto({
     throw new Error('missing_couple_id');
   }
 
-  console.log('[photo] submit drop photo', {
-    coupleId,
-    dropId,
-    userId,
-    fileInfo,
-  });
+  if (__DEV__) {
+    console.log('[photo] submit drop photo', {
+      coupleId,
+      dropId,
+      userId,
+      fileInfo,
+    });
+  }
 
   const uploaded = await uploadDropImage({
     base64,
@@ -106,12 +110,14 @@ export async function submitDropPhoto({
     throw error;
   }
 
-  console.log('[photo] drop submission saved', {
-    id: data.id,
-    storagePath: uploaded.storagePath,
-    imageUrl: uploaded.imageUrl,
-    fileInfo,
-  });
+  if (__DEV__) {
+    console.log('[photo] drop submission saved', {
+      id: data.id,
+      storagePath: uploaded.storagePath,
+      imageUrl: uploaded.imageUrl,
+      fileInfo,
+    });
+  }
 
   if (shouldNotifyPartner) {
     void notifyPartnerPhotoSubmitted({

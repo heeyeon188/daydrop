@@ -135,13 +135,13 @@ export default function SignupScreen() {
         throw new Error('missing_apple_identity_token');
       }
 
-      await signInWithAppleIdToken(credential.identityToken);
+      await signInWithAppleIdToken(credential.identityToken, credential.fullName);
     } catch (error) {
       if (isAppleAuthCanceled(error)) {
         return;
       }
 
-      console.error('apple sign-in failed', error);
+      console.error('Apple login error', error);
       Alert.alert(t.socialSignInFailed, t.tryAgain);
     } finally {
       authSubmittingRef.current = false;

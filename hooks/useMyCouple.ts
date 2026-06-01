@@ -33,11 +33,26 @@ export function useMyCouple(enabled: boolean) {
     refetch();
   }, [refetch]);
 
+  const selectOptimistic = React.useCallback((coupleId: string) => {
+    setCouple((current) => {
+      const selected = current?.availableCouples.find((option) => option.couple.id === coupleId);
+      if (!current || !selected) {
+        return current;
+      }
+
+      return {
+        ...selected,
+        availableCouples: current.availableCouples,
+      };
+    });
+  }, []);
+
   return {
     couple,
     latestDisconnectedCouple,
     loading,
     error,
     refetch,
+    selectOptimistic,
   };
 }
