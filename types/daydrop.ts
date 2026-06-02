@@ -69,6 +69,8 @@ export type DropSubmission = {
   drop_id: string;
   couple_id: string;
   user_id: string;
+  display_image_url: string | null;
+  display_storage_path: string | null;
   image_url: string;
   storage_path: string;
   note: string | null;

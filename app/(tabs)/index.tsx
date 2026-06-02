@@ -75,6 +75,7 @@ const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
 const RECENT_THUMB_DEFAULT_HEIGHT = 82;
 const HOME_RECENT_DROPS_LIMIT = 5;
 const LOCKED_PHOTO_BLUR_RADIUS = 32;
+const HOME_IMAGE_TRANSITION_MS = 180;
 const TODAY_DROP_PENDING_TEXT_COLOR = '#666666';
 const TODAY_DROP_PENDING_ICON_COLOR = '#7890AE';
 const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
@@ -336,6 +337,37 @@ function MissionContent({
   const partnerCount = partnerOptions.length;
   const canAddPartner = partnerCount < 4;
   const visibleRecentDrops = React.useMemo(() => recentDrops.slice(0, HOME_RECENT_DROPS_LIMIT), [recentDrops]);
+  const homePhotoUrls = React.useMemo(() => {
+    const urls = new Set<string>();
+
+    today?.submissions.forEach((submission) => {
+      const image = getSubmissionDisplayImage(submission);
+      if (image) {
+        urls.add(image);
+      }
+    });
+
+    visibleRecentDrops.forEach((drop) => {
+      drop.drop_submissions.forEach((submission) => {
+        const image = getSubmissionDisplayImage(submission);
+        if (image) {
+          urls.add(image);
+        }
+      });
+    });
+
+    return Array.from(urls);
+  }, [today?.submissions, visibleRecentDrops]);
+
+  React.useEffect(() => {
+    if (homePhotoUrls.length === 0) {
+      return;
+    }
+
+    ExpoImage.prefetch(homePhotoUrls, 'memory-disk').catch((nextError) => {
+      console.warn('[photo] home image prefetch failed', nextError);
+    });
+  }, [homePhotoUrls]);
 
   React.useEffect(() => {
     let mounted = true;
@@ -443,6 +475,7 @@ function MissionContent({
           capturedUri: asset.uri,
           compressApplied: picked.compressed === true,
           height: picked.height,
+          mimeType: picked.mimeType,
           originalHeight: asset.height,
           originalWidth: asset.width,
           reencodeApplied: picked.reencoded === true,
@@ -1211,6 +1244,8 @@ function TodayDropPair({
   const myLabel = displayMemberName(members.me, t.me);
   const partnerLabel = displayMemberName(members.partner, t.partner);
   const mission = getMissionPrompt(today.mission, language);
+  const mineDisplayImage = getSubmissionDisplayImage(mine);
+  const partnerDisplayImage = getSubmissionDisplayImage(partner);
 
   if (!hasPartner) {
     return (
@@ -1219,9 +1254,9 @@ function TodayDropPair({
         {mine ? (
           <EditablePhotoSlot
             deleting={deletingPhoto}
-            image={mine.image_url}
+            image={mineDisplayImage}
             label={myLabel}
-            onOpenImage={() => onOpenImage({ canDelete: true, image: mine.image_url, label: myLabel, mission })}
+            onOpenImage={() => onOpenImage({ canDelete: true, image: mineDisplayImage, label: myLabel, mission })}
             side="right"
           />
         ) : (
@@ -1235,16 +1270,16 @@ function TodayDropPair({
     return (
       <>
         <PhotoSlot
-          image={partner?.image_url}
+          image={partnerDisplayImage}
           label={partnerLabel}
           side="left"
-          onPress={() => onOpenImage({ canDelete: false, image: partner?.image_url, label: partnerLabel, mission })}
+          onPress={() => onOpenImage({ canDelete: false, image: partnerDisplayImage, label: partnerLabel, mission })}
         />
         <EditablePhotoSlot
           deleting={deletingPhoto}
-          image={mine?.image_url}
+          image={mineDisplayImage}
           label={myLabel}
-          onOpenImage={() => onOpenImage({ canDelete: true, image: mine?.image_url, label: myLabel, mission })}
+          onOpenImage={() => onOpenImage({ canDelete: true, image: mineDisplayImage, label: myLabel, mission })}
           side="right"
         />
       </>
@@ -1257,9 +1292,9 @@ function TodayDropPair({
         <WaitingSlot label={partnerLabel} t={t} />
         <EditablePhotoSlot
           deleting={deletingPhoto}
-          image={mine?.image_url}
+          image={mineDisplayImage}
           label={myLabel}
-          onOpenImage={() => onOpenImage({ canDelete: true, image: mine?.image_url, label: myLabel, mission })}
+          onOpenImage={() => onOpenImage({ canDelete: true, image: mineDisplayImage, label: myLabel, mission })}
           side="right"
         />
       </>
@@ -1269,7 +1304,7 @@ function TodayDropPair({
   if (state === 'partnerOnly') {
     return (
       <>
-        <LockedPhotoSlot image={partner?.image_url} label={partnerLabel} onPress={onLockedPartnerPress} t={t} />
+        <LockedPhotoSlot image={partnerDisplayImage} label={partnerLabel} onPress={onLockedPartnerPress} t={t} />
         <SendSlot label={myLabel} onPress={onUploadPress} t={t} />
       </>
     );
@@ -1298,6 +1333,10 @@ function getSubmissionState(submissions: DropSubmission[], myUserId: string): Dr
   if (mine) return 'meOnly';
   if (partner) return 'partnerOnly';
   return 'none';
+}
+
+function getSubmissionDisplayImage(submission: DropSubmission | null | undefined) {
+  return submission?.display_image_url?.trim() || submission?.image_url?.trim() || undefined;
 }
 
 function getStateCopy(state: DropState, t: Copy, hasPartner: boolean) {
@@ -1477,13 +1516,16 @@ function SafeImage({ blurRadius = 0, image, label, resizeMode = 'contain' }: { b
   if (locked) {
     return (
       <View style={styles.lockedImageWrap}>
-        <RNImage
+        <ExpoImage
           blurRadius={lockedBlurRadius}
-          resizeMode={resizeMode}
-          source={{ uri: image }}
+          cachePolicy="memory-disk"
+          contentFit={toImageContentFit(resizeMode)}
+          priority="high"
+          source={image}
           style={styles.slotImage}
+          transition={HOME_IMAGE_TRANSITION_MS}
           onError={(event) => {
-            console.warn(`Daydrop image failed to load (${label})`, event.nativeEvent.error);
+            console.warn(`Daydrop image failed to load (${label})`, event.error);
             setFailed(true);
           }}
         />
@@ -1498,6 +1540,7 @@ function SafeImage({ blurRadius = 0, image, label, resizeMode = 'contain' }: { b
       priority="high"
       source={image}
       style={styles.slotImage}
+      transition={HOME_IMAGE_TRANSITION_MS}
       onError={(event) => {
         console.warn(`Daydrop image failed to load (${label})`, event.error);
         setFailed(true);
@@ -1535,8 +1578,10 @@ function RecentDropRow({
 }) {
   const { mine, partner } = React.useMemo(() => splitSubmissions(drop.drop_submissions, myUserId), [drop.drop_submissions, myUserId]);
   const shouldLock = hasPartner && !mine && Boolean(partner);
-  const mineSize = useImageSize(mine?.image_url);
-  const partnerSize = useImageSize(partner?.image_url);
+  const mineImage = getSubmissionDisplayImage(mine);
+  const partnerImage = getSubmissionDisplayImage(partner);
+  const mineSize = useImageSize(mineImage);
+  const partnerSize = useImageSize(partnerImage);
   const mineHeight = calculateImageHeight(RECENT_THUMB_SLOT_WIDTH, mineSize, RECENT_THUMB_DEFAULT_HEIGHT);
   const partnerHeight = calculateImageHeight(RECENT_THUMB_SLOT_WIDTH, partnerSize, RECENT_THUMB_DEFAULT_HEIGHT);
   const thumbHeight = Math.max(mine ? mineHeight : 0, partner ? partnerHeight : 0, RECENT_THUMB_DEFAULT_HEIGHT);
@@ -1544,8 +1589,8 @@ function RecentDropRow({
   return (
     <Pressable onPress={onPress} style={[styles.recentRow, { minHeight: Math.max(88, thumbHeight + 6) }]}>
       <View style={[styles.recentThumbs, { height: thumbHeight }]}>
-        <RecentThumb height={partner ? partnerHeight : thumbHeight} image={partner?.image_url} locked={shouldLock} side="left" />
-        <RecentThumb height={mine ? mineHeight : thumbHeight} image={mine?.image_url} locked={false} side="right" />
+        <RecentThumb height={partner ? partnerHeight : thumbHeight} image={partnerImage} locked={shouldLock} side="left" />
+        <RecentThumb height={mine ? mineHeight : thumbHeight} image={mineImage} locked={false} side="right" />
       </View>
       <View style={styles.recentInfo}>
         <Text allowFontScaling={false} style={styles.recentDate}>
@@ -1696,6 +1741,8 @@ function AllDropRow({
 }) {
   const { mine, partner } = React.useMemo(() => splitSubmissions(drop.drop_submissions, myUserId), [drop.drop_submissions, myUserId]);
   const shouldLock = hasPartner && !mine && Boolean(partner);
+  const mineImage = getSubmissionDisplayImage(mine);
+  const partnerImage = getSubmissionDisplayImage(partner);
 
   return (
     <Pressable onPress={onPress} style={styles.allDropRow}>
@@ -1711,8 +1758,8 @@ function AllDropRow({
         </Text>
       </View>
       <View style={styles.allDropThumbs}>
-        <RecentThumb image={partner?.image_url} locked={shouldLock} side="left" />
-        <RecentThumb image={mine?.image_url} locked={false} side="right" />
+        <RecentThumb image={partnerImage} locked={shouldLock} side="left" />
+        <RecentThumb image={mineImage} locked={false} side="right" />
       </View>
     </Pressable>
   );
@@ -1737,6 +1784,8 @@ function DropDetailModal({
   const submissions = React.useMemo(() => (drop ? splitSubmissions(drop.drop_submissions, myUserId) : { mine: null, partner: null }), [drop, myUserId]);
   const { mine, partner } = submissions;
   const shouldLock = hasPartner && detail?.state === 'partnerOnly' && Boolean(partner);
+  const mineImage = getSubmissionDisplayImage(mine);
+  const partnerImage = getSubmissionDisplayImage(partner);
 
   return (
     <Modal animationType="slide" transparent visible={Boolean(detail)} onRequestClose={onClose}>
@@ -1757,8 +1806,8 @@ function DropDetailModal({
             </Pressable>
           </View>
           <View style={styles.detailPhotos}>
-            <DetailPhoto image={partner?.image_url} label={t.partner} locked={shouldLock} side="left" />
-            <DetailPhoto image={mine?.image_url} label={t.me} locked={false} side="right" />
+            <DetailPhoto image={partnerImage} label={t.partner} locked={shouldLock} side="left" />
+            <DetailPhoto image={mineImage} label={t.me} locked={false} side="right" />
           </View>
         </View>
       </View>
@@ -4474,9 +4523,9 @@ const styles = StyleSheet.create({
   },
   missionTitle: {
     color: '#111111',
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: '800',
-    lineHeight: 22,
+    lineHeight: 24,
     marginBottom: 6,
   },
   missionMeta: {

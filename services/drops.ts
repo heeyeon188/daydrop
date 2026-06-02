@@ -2,7 +2,7 @@ import { supabase } from '@/lib/supabase';
 import { notifyPartnerPhotoSubmitted } from '@/services/notifications';
 import {
   createPhotoSignedUrl,
-  deletePhotoStorageFile,
+  deletePhotoStorageFiles,
   extractStoragePathFromUrl,
   uploadDropImage,
 } from '@/services/storage';
@@ -43,6 +43,7 @@ export async function submitDropPhoto({
     capturedUri?: string;
     compressApplied?: boolean;
     height: number;
+    mimeType?: string;
     originalHeight?: number;
     originalWidth?: number;
     reencodeApplied?: boolean;
@@ -77,6 +78,7 @@ export async function submitDropPhoto({
           capturedUri: fileInfo.capturedUri ?? fileInfo.uri,
           compressApplied: fileInfo.compressApplied,
           height: fileInfo.height,
+          mimeType: fileInfo.mimeType,
           originalHeight: fileInfo.originalHeight,
           originalWidth: fileInfo.originalWidth,
           reencodeApplied: fileInfo.reencodeApplied,
@@ -94,6 +96,8 @@ export async function submitDropPhoto({
       drop_id: dropId,
       couple_id: coupleId,
       user_id: userId,
+      display_image_url: uploaded.displayImageUrl,
+      display_storage_path: uploaded.displayStoragePath,
       image_url: uploaded.imageUrl,
       storage_path: uploaded.storagePath,
     })
@@ -101,8 +105,9 @@ export async function submitDropPhoto({
     .single();
 
   if (error) {
-    await deletePhotoStorageFile(uploaded.storagePath).catch((cleanupError) => {
+    await deletePhotoStorageFiles([uploaded.storagePath, uploaded.displayStoragePath].filter((path): path is string => Boolean(path))).catch((cleanupError) => {
       console.error('[photo] uploaded storage cleanup failed after db insert error', {
+        displayStoragePath: uploaded.displayStoragePath,
         storagePath: uploaded.storagePath,
         error: cleanupError,
       });
@@ -113,6 +118,8 @@ export async function submitDropPhoto({
   if (__DEV__) {
     console.log('[photo] drop submission saved', {
       id: data.id,
+      displayImageUrl: uploaded.displayImageUrl,
+      displayStoragePath: uploaded.displayStoragePath,
       storagePath: uploaded.storagePath,
       imageUrl: uploaded.imageUrl,
       fileInfo,
@@ -131,11 +138,13 @@ export async function submitDropPhoto({
 
 type DeleteMyTodayDropPhotoResult = {
   deleted: boolean;
+  display_storage_path?: string | null;
   drop_id?: string;
   storage_path?: string;
 };
 
 type DeleteMyTodayDropPhotoTarget = {
+  display_storage_path?: string | null;
   drop_id: string;
   storage_path: string;
 };
@@ -163,7 +172,7 @@ export async function deleteMyTodayDropPhoto({
     throw new Error('missing_storage_path');
   }
 
-  await deletePhotoStorageFile(storagePath);
+  await deletePhotoStorageFiles([storagePath, target?.display_storage_path].filter((path): path is string => Boolean(path)));
 
   const deleteRowRpcName = 'delete_my_today_drop_photo_row';
   const deleteRowRpcParams = { target_storage_path: storagePath };
@@ -174,7 +183,12 @@ export async function deleteMyTodayDropPhoto({
     throw deleteError;
   }
 
-  return (deleteData ?? { deleted: false, drop_id: target?.drop_id, storage_path: storagePath }) as DeleteMyTodayDropPhotoResult;
+  return (deleteData ?? {
+    deleted: false,
+    display_storage_path: target?.display_storage_path ?? null,
+    drop_id: target?.drop_id,
+    storage_path: storagePath,
+  }) as DeleteMyTodayDropPhotoResult;
 }
 
 export async function deletePhotoSubmission(submissionId: string) {
@@ -190,7 +204,7 @@ export async function deletePhotoSubmission(submissionId: string) {
 
   const { data: submission, error: lookupError } = await supabase
     .from('drop_submissions')
-    .select('id, user_id, storage_path, image_url')
+    .select('id, user_id, storage_path, image_url, display_storage_path')
     .eq('id', submissionId)
     .maybeSingle();
 
@@ -213,7 +227,7 @@ export async function deletePhotoSubmission(submissionId: string) {
     throw new Error('missing_storage_path');
   }
 
-  await deletePhotoStorageFile(storagePath);
+  await deletePhotoStorageFiles([storagePath, submission.display_storage_path].filter((path): path is string => Boolean(path)));
 
   const { data: deleteData, error: deleteError } = await supabase.rpc('delete_my_drop_submission_photo_row', {
     target_storage_path: storagePath,
@@ -275,7 +289,9 @@ function hasSubmissionPhoto(submission: Pick<DropSubmission, 'image_url' | 'stor
   return Boolean(submission.image_url?.trim() || submission.storage_path?.trim());
 }
 
-async function signSubmissionUrls<T extends { storage_path: string; image_url: string }>(submissions: T[]) {
+async function signSubmissionUrls<T extends { display_image_url?: string | null; display_storage_path?: string | null; storage_path: string; image_url: string }>(
+  submissions: T[]
+) {
   const signedUrlByPath = new Map<string, Promise<string>>();
 
   return Promise.all(
@@ -287,16 +303,38 @@ async function signSubmissionUrls<T extends { storage_path: string; image_url: s
       if (!signedUrlByPath.has(submission.storage_path)) {
         signedUrlByPath.set(submission.storage_path, createPhotoSignedUrl(submission.storage_path));
       }
-      return signSubmissionUrl(submission, signedUrlByPath.get(submission.storage_path)!);
+      if (submission.display_storage_path?.trim() && !signedUrlByPath.has(submission.display_storage_path)) {
+        signedUrlByPath.set(submission.display_storage_path, createPhotoSignedUrl(submission.display_storage_path));
+      }
+      return signSubmissionUrl(
+        submission,
+        signedUrlByPath.get(submission.storage_path)!,
+        submission.display_storage_path?.trim() ? signedUrlByPath.get(submission.display_storage_path) : undefined
+      );
     })
   );
 }
 
-async function signSubmissionUrl<T extends { storage_path: string; image_url: string }>(submission: T, signedUrl: Promise<string>) {
+async function signSubmissionUrl<T extends { display_image_url?: string | null; display_storage_path?: string | null; storage_path: string; image_url: string }>(
+  submission: T,
+  signedUrl: Promise<string>,
+  displaySignedUrl?: Promise<string>
+) {
   try {
+    const imageUrl = await signedUrl;
+    let displayImageUrl = submission.display_image_url ?? null;
+    if (displaySignedUrl) {
+      try {
+        displayImageUrl = await displaySignedUrl;
+      } catch {
+        displayImageUrl = null;
+      }
+    }
+
     return {
       ...submission,
-      image_url: await signedUrl,
+      display_image_url: displayImageUrl,
+      image_url: imageUrl,
     };
   } catch {
     return submission;
