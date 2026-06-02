@@ -821,21 +821,27 @@ function DaydropCameraModal({
   const [facing, setFacing] = React.useState<CameraType>('back');
   const [flash, setFlash] = React.useState<'off' | 'on'>('off');
   const [captured, setCaptured] = React.useState<(DaydropPhotoAsset & { didFlip?: boolean; mirrorMode?: string; source: CameraFacing }) | null>(null);
+  const [cameraActive, setCameraActive] = React.useState(false);
   const [cameraReady, setCameraReady] = React.useState(false);
   const [capturing, setCapturing] = React.useState(false);
   const [defaultBackLens, setDefaultBackLens] = React.useState<string | undefined>(undefined);
   const cameraRef = React.useRef<CameraView>(null);
+  const visibleRef = React.useRef(visible);
   const hasPermission = permission?.granted === true;
-  const shutterDisabled = !hasPermission || !cameraReady || capturing || submitting;
+  const shutterDisabled = !hasPermission || !cameraActive || !cameraReady || capturing || submitting;
   const selectedLens = Platform.OS === 'ios' && facing === 'back' ? defaultBackLens : undefined;
 
   React.useEffect(() => {
+    visibleRef.current = visible;
     if (!visible) {
+      setCameraActive(false);
       setCaptured(null);
       setCapturing(false);
       setCameraReady(false);
       setFlash('off');
       setFacing('back');
+    } else {
+      setCameraActive(true);
     }
   }, [visible]);
 
@@ -848,13 +854,14 @@ function DaydropCameraModal({
       console.log('[DaydropCamera] state', {
         facing,
         hasPermission,
+        cameraActive,
         cameraReady,
         isCapturing: capturing,
         hasCameraRef: Boolean(cameraRef.current),
         shutterDisabled,
       });
     }
-  }, [cameraReady, captured, capturing, facing, hasPermission, shutterDisabled, visible]);
+  }, [cameraActive, cameraReady, captured, capturing, facing, hasPermission, shutterDisabled, visible]);
 
   const updateDefaultBackLens = React.useCallback((lenses: string[]) => {
     const nextLens = selectDefaultBackLens(lenses);
@@ -894,6 +901,14 @@ function DaydropCameraModal({
 
       if (!photo?.base64) {
         throw new Error('photo_read_failed');
+      }
+
+      setCameraReady(false);
+      setCameraActive(false);
+      await waitForCameraSessionPause();
+
+      if (!visibleRef.current) {
+        return;
       }
 
       const normalized = await normalizeCameraPhoto(
@@ -946,6 +961,9 @@ function DaydropCameraModal({
       return;
     }
 
+    setCameraActive(false);
+    await waitForCameraSessionPause();
+
     await onUsePhoto(
       {
         base64: captured.base64,
@@ -971,9 +989,15 @@ function DaydropCameraModal({
   };
 
   const toggleFacing = () => {
+    setCameraActive(false);
     setCameraReady(false);
     setCapturing(false);
     setFacing((current) => (current === 'front' ? 'back' : 'front'));
+    requestAnimationFrame(() => {
+      if (visibleRef.current) {
+        setCameraActive(true);
+      }
+    });
   };
 
   const topMission = mission || (language === 'ko' ? '오늘의 Mission' : "Today's Mission");
@@ -1029,7 +1053,7 @@ function DaydropCameraModal({
                 <CameraView
                   key={`daydrop-camera-${facing}`}
                   ref={cameraRef}
-                  active={visible && !captured}
+                  active={visible && cameraActive && !captured}
                   animateShutter
                   facing={facing}
                   flash={flash}
@@ -1053,6 +1077,11 @@ function DaydropCameraModal({
                       void logAvailablePictureSizes(cameraRef.current, facing);
                     }
                   }}
+                  onMountError={(event) => {
+                    console.error('[DaydropCamera] mount error', event);
+                    setCameraReady(false);
+                    setCameraActive(false);
+                  }}
                   style={styles.cameraPreview}
                 />
               )}
@@ -1065,6 +1094,11 @@ function DaydropCameraModal({
                   onPress={() => {
                     setCameraReady(false);
                     setCaptured(null);
+                    requestAnimationFrame(() => {
+                      if (visibleRef.current) {
+                        setCameraActive(true);
+                      }
+                    });
                   }}
                   style={styles.cameraTextButton}>
                   <Text allowFontScaling={false} style={styles.cameraTextButtonLabel}>
@@ -1102,6 +1136,14 @@ function DaydropCameraModal({
       </SafeAreaView>
     </Modal>
   );
+}
+
+function waitForCameraSessionPause() {
+  return new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve());
+    });
+  });
 }
 
 async function logAvailablePictureSizes(camera: CameraView | null, facing: CameraType) {
