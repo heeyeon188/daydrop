@@ -2,7 +2,7 @@ import { Feather } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import * as Application from 'expo-application';
-import { CameraView, type CameraType, useCameraPermissions } from 'expo-camera';
+import { CameraView, useCameraPermissions, type CameraType } from 'expo-camera';
 import * as Clipboard from 'expo-clipboard';
 import * as Device from 'expo-device';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -12,12 +12,9 @@ import * as Notifications from 'expo-notifications';
 import { router } from 'expo-router';
 import * as Sharing from 'expo-sharing';
 import React from 'react';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 import {
   ActivityIndicator,
   Alert,
-  Image as RNImage,
   KeyboardAvoidingView,
   LayoutChangeEvent,
   Linking,
@@ -25,6 +22,7 @@ import {
   Platform,
   Pressable,
   RefreshControl,
+  Image as RNImage,
   SafeAreaView,
   ScrollView,
   Share,
@@ -35,16 +33,18 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { captureRef } from 'react-native-view-shot';
 
 import { PRIVACY_POLICY_URL, SUPPORT_EMAIL } from '@/constants/appConfig';
-import { getTranslations, normalizeLanguage, type Language } from '@/lib/i18n';
-import { findCountryOption, getCountryLabel, searchCountryOptions } from '@/lib/locations';
 import { useMyCouple } from '@/hooks/useMyCouple';
 import { useProfile } from '@/hooks/useProfile';
 import { useSession } from '@/hooks/useSession';
 import { useTodayDrop } from '@/hooks/useTodayDrop';
+import { getTranslations, normalizeLanguage, type Language } from '@/lib/i18n';
+import { findCountryOption, getCountryLabel, searchCountryOptions } from '@/lib/locations';
 import { deleteAccount } from '@/services/account';
 import { logAppleSignInError, signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut } from '@/services/auth';
 import { createCoupleInvite, disconnectPartnerConnection, joinCoupleByInviteCode, selectCouple, type MyCouple, type MyCoupleOption } from '@/services/couple';
@@ -74,7 +74,8 @@ const RECENT_THUMB_GROUP_WIDTH = 138;
 const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
 const RECENT_THUMB_DEFAULT_HEIGHT = 82;
 const HOME_RECENT_DROPS_LIMIT = 5;
-const LOCKED_PHOTO_BLUR_RADIUS = 32;
+const LOCKED_PHOTO_BLUR_RADIUS = 58;
+const LOCKED_THUMBNAIL_PHOTO_BLUR_RADIUS = 84;
 const HOME_IMAGE_TRANSITION_MS = 180;
 const TODAY_DROP_PENDING_TEXT_COLOR = '#666666';
 const TODAY_DROP_PENDING_ICON_COLOR = '#7890AE';
@@ -821,27 +822,21 @@ function DaydropCameraModal({
   const [facing, setFacing] = React.useState<CameraType>('back');
   const [flash, setFlash] = React.useState<'off' | 'on'>('off');
   const [captured, setCaptured] = React.useState<(DaydropPhotoAsset & { didFlip?: boolean; mirrorMode?: string; source: CameraFacing }) | null>(null);
-  const [cameraActive, setCameraActive] = React.useState(false);
   const [cameraReady, setCameraReady] = React.useState(false);
   const [capturing, setCapturing] = React.useState(false);
   const [defaultBackLens, setDefaultBackLens] = React.useState<string | undefined>(undefined);
   const cameraRef = React.useRef<CameraView>(null);
-  const visibleRef = React.useRef(visible);
   const hasPermission = permission?.granted === true;
-  const shutterDisabled = !hasPermission || !cameraActive || !cameraReady || capturing || submitting;
+  const shutterDisabled = !hasPermission || !cameraReady || capturing || submitting;
   const selectedLens = Platform.OS === 'ios' && facing === 'back' ? defaultBackLens : undefined;
 
   React.useEffect(() => {
-    visibleRef.current = visible;
     if (!visible) {
-      setCameraActive(false);
       setCaptured(null);
       setCapturing(false);
       setCameraReady(false);
       setFlash('off');
       setFacing('back');
-    } else {
-      setCameraActive(true);
     }
   }, [visible]);
 
@@ -854,14 +849,13 @@ function DaydropCameraModal({
       console.log('[DaydropCamera] state', {
         facing,
         hasPermission,
-        cameraActive,
         cameraReady,
         isCapturing: capturing,
         hasCameraRef: Boolean(cameraRef.current),
         shutterDisabled,
       });
     }
-  }, [cameraActive, cameraReady, captured, capturing, facing, hasPermission, shutterDisabled, visible]);
+  }, [cameraReady, captured, capturing, facing, hasPermission, shutterDisabled, visible]);
 
   const updateDefaultBackLens = React.useCallback((lenses: string[]) => {
     const nextLens = selectDefaultBackLens(lenses);
@@ -901,14 +895,6 @@ function DaydropCameraModal({
 
       if (!photo?.base64) {
         throw new Error('photo_read_failed');
-      }
-
-      setCameraReady(false);
-      setCameraActive(false);
-      await waitForCameraSessionPause();
-
-      if (!visibleRef.current) {
-        return;
       }
 
       const normalized = await normalizeCameraPhoto(
@@ -961,9 +947,6 @@ function DaydropCameraModal({
       return;
     }
 
-    setCameraActive(false);
-    await waitForCameraSessionPause();
-
     await onUsePhoto(
       {
         base64: captured.base64,
@@ -989,15 +972,9 @@ function DaydropCameraModal({
   };
 
   const toggleFacing = () => {
-    setCameraActive(false);
     setCameraReady(false);
     setCapturing(false);
     setFacing((current) => (current === 'front' ? 'back' : 'front'));
-    requestAnimationFrame(() => {
-      if (visibleRef.current) {
-        setCameraActive(true);
-      }
-    });
   };
 
   const topMission = mission || (language === 'ko' ? '오늘의 Mission' : "Today's Mission");
@@ -1053,7 +1030,7 @@ function DaydropCameraModal({
                 <CameraView
                   key={`daydrop-camera-${facing}`}
                   ref={cameraRef}
-                  active={visible && cameraActive && !captured}
+                  active={visible && !captured}
                   animateShutter
                   facing={facing}
                   flash={flash}
@@ -1077,11 +1054,6 @@ function DaydropCameraModal({
                       void logAvailablePictureSizes(cameraRef.current, facing);
                     }
                   }}
-                  onMountError={(event) => {
-                    console.error('[DaydropCamera] mount error', event);
-                    setCameraReady(false);
-                    setCameraActive(false);
-                  }}
                   style={styles.cameraPreview}
                 />
               )}
@@ -1094,11 +1066,6 @@ function DaydropCameraModal({
                   onPress={() => {
                     setCameraReady(false);
                     setCaptured(null);
-                    requestAnimationFrame(() => {
-                      if (visibleRef.current) {
-                        setCameraActive(true);
-                      }
-                    });
                   }}
                   style={styles.cameraTextButton}>
                   <Text allowFontScaling={false} style={styles.cameraTextButtonLabel}>
@@ -1136,14 +1103,6 @@ function DaydropCameraModal({
       </SafeAreaView>
     </Modal>
   );
-}
-
-function waitForCameraSessionPause() {
-  return new Promise<void>((resolve) => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => resolve());
-    });
-  });
 }
 
 async function logAvailablePictureSizes(camera: CameraView | null, facing: CameraType) {
@@ -1653,7 +1612,7 @@ function RecentDropRow({
 function RecentThumb({ height = RECENT_THUMB_DEFAULT_HEIGHT, image, locked, side }: { height?: number; image?: string; locked: boolean; side: 'left' | 'right' }) {
   return (
     <View style={[styles.recentThumb, side === 'left' ? styles.recentThumbLeft : styles.recentThumbRight, { height }]}>
-      {image ? <SafeImage blurRadius={locked ? LOCKED_PHOTO_BLUR_RADIUS : 0} image={image} label={`recent-${side}`} /> : <View style={styles.recentPlaceholder} />}
+      {image ? <SafeImage blurRadius={locked ? LOCKED_THUMBNAIL_PHOTO_BLUR_RADIUS : 0} image={image} label={`recent-${side}`} /> : <View style={styles.recentPlaceholder} />}
       {locked ? (
         <>
           <View style={styles.recentLock}>

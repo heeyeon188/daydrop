@@ -2,13 +2,13 @@
   "expo": {
     "name": "daydrop",
     "slug": "daydrop",
-    "version": "1.0.1",
+    "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "daydrop",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "supportsTablet": false,
+      "supportsTablet": true,
       "usesAppleSignIn": true,
       "infoPlist": {
         "NSCameraUsageDescription": "Daydrop uses the camera so you can take and share your daily photo.",
@@ -46,7 +46,7 @@
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
+          "backgroundColor": "#000000",
           "dark": {
             "backgroundColor": "#000000"
           }
@@ -80,7 +80,9 @@
       "expo-apple-authentication",
       "expo-web-browser",
       "expo-notifications",
-      "expo-font"
+      "expo-font",
+      "expo-image",
+      "expo-sharing"
     ],
     "experiments": {
       "typedRoutes": true,
@@ -89,9 +91,9 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "ffabe226-1f06-4748-b42b-520d33265a2c"
+        "projectId": "4bbf1d8c-1d3e-4e72-9417-e7022119fc58"
       }
     },
-    "owner": "heeyeon00"
+    "owner": "heeyeonkim112"
   }
 }
