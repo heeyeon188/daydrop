@@ -4,6 +4,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.106.1';
 type Submission = {
   display_storage_path: string | null;
   storage_path: string | null;
+  thumbnail_storage_path: string | null;
 };
 
 type SupabaseAdminClient = ReturnType<typeof createClient>;
@@ -107,7 +108,7 @@ async function throwIfError<T>(request: PromiseLike<{ error: Error | null; data?
 async function deleteMyUploadedPhotosForAccountDeletion(adminClient: SupabaseAdminClient, userId: string) {
   const { data: submissions, error: submissionsError } = await adminClient
     .from('drop_submissions')
-    .select('storage_path, display_storage_path')
+    .select('storage_path, display_storage_path, thumbnail_storage_path')
     .eq('user_id', userId);
 
   if (submissionsError) {
@@ -116,7 +117,7 @@ async function deleteMyUploadedPhotosForAccountDeletion(adminClient: SupabaseAdm
   }
 
   const storagePaths = ((submissions ?? []) as Submission[])
-    .flatMap((submission) => [submission.storage_path, submission.display_storage_path])
+    .flatMap((submission) => [submission.storage_path, submission.display_storage_path, submission.thumbnail_storage_path])
     .filter((path): path is string => Boolean(path));
 
   for (let index = 0; index < storagePaths.length; index += 100) {

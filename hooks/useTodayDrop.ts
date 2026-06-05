@@ -21,12 +21,14 @@ const IMAGE_PREFETCH_TIMEOUT_MS = 1200;
 const prefetchedImageKeys = new Set<string>();
 const prefetchingImageKeys = new Set<string>();
 
-export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null) {
+export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null, currentUserId?: string | null) {
   const [today, setToday] = React.useState<TodayDropPayload | null>(null);
   const [recentDrops, setRecentDrops] = React.useState<RecentDrop[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
+  const [loadedOnce, setLoadedOnce] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const hasLoaded = !enabled || loadedOnce;
   const refetchInFlightRef = React.useRef<Promise<RefetchResult> | null>(null);
   const realtimeRefetchTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastExplicitRefreshAtRef = React.useRef(0);
@@ -44,10 +46,12 @@ export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null
       if (!enabled) {
         setToday(null);
         setRecentDrops([]);
+        setLoadedOnce(false);
         return null;
       }
 
       const nextRefetch = (async () => {
+        const refetchTimerLabel = '[photo] home refetch/signed URL regeneration';
         if (isRefresh) {
           setRefreshing(true);
         } else {
@@ -56,6 +60,9 @@ export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null
         setError(null);
 
         try {
+          if (__DEV__) {
+            console.time(refetchTimerLabel);
+          }
           const nextToday = await getOrCreateTodayDrop();
           setToday((current) => (areTodayImageUrlsEqual(current, nextToday) ? current : nextToday));
 
@@ -71,6 +78,10 @@ export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null
           setError('네트워크 상태를 확인하고 다시 시도해주세요.');
           return null;
         } finally {
+          if (__DEV__) {
+            console.timeEnd(refetchTimerLabel);
+          }
+          setLoadedOnce(true);
           setLoading(false);
           setRefreshing(false);
           refetchInFlightRef.current = null;
@@ -96,6 +107,24 @@ export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null
       };
       void prefetchDropImageUrls(collectTodayImageUrls(nextToday), 0);
       return nextToday;
+    });
+  }, []);
+
+  const removeLocalSubmission = React.useCallback((submissionId: string) => {
+    setToday((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const nextSubmissions = current.submissions.filter((submission) => submission.id !== submissionId);
+      if (nextSubmissions.length === current.submissions.length) {
+        return current;
+      }
+
+      return {
+        ...current,
+        submissions: nextSubmissions,
+      };
     });
   }, []);
 
@@ -143,7 +172,10 @@ export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null
           table: 'drop_submissions',
           filter: `couple_id=eq.${coupleId}`,
         },
-        () => {
+        (payload) => {
+          if (currentUserId && getRealtimePayloadUserId(payload) === currentUserId) {
+            return;
+          }
           scheduleRealtimeRefetch();
         }
       )
@@ -152,37 +184,56 @@ export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [scheduleRealtimeRefetch, today?.daily_drop.couple_id]);
+  }, [currentUserId, scheduleRealtimeRefetch, today?.daily_drop.couple_id]);
 
   return {
     today,
     recentDrops,
+    hasLoaded,
     loading,
     refreshing,
     error,
     applyLocalSubmission,
+    removeLocalSubmission,
     refetch,
   };
 }
 
 function collectTodayImageUrls(today: TodayDropPayload): PrefetchImage[] {
-  return collectSubmissionImages(today.submissions);
+  return collectSubmissionImages(today.submissions, 'display');
 }
 
 function collectRecentImageUrls(drops: RecentDrop[]): PrefetchImage[] {
-  return drops.slice(0, RECENT_PREFETCH_DROP_LIMIT).flatMap((drop) => collectSubmissionImages(drop.drop_submissions));
+  return drops.slice(0, RECENT_PREFETCH_DROP_LIMIT).flatMap((drop) => collectSubmissionImages(drop.drop_submissions, 'thumbnail'));
 }
 
-function collectSubmissionImages(submissions: DropSubmission[]): PrefetchImage[] {
+function collectSubmissionImages(submissions: DropSubmission[], usage: 'display' | 'thumbnail'): PrefetchImage[] {
   return submissions.reduce<PrefetchImage[]>((images, submission) => {
-    if (isNonEmptyString(submission.image_url)) {
+    const image = usage === 'thumbnail' ? getSubmissionThumbnailImage(submission) : getSubmissionDisplayImage(submission);
+    if (image) {
       images.push({
-        key: submission.storage_path?.trim() || submission.image_url,
-        url: submission.image_url,
+        key: getSubmissionImageCacheKey(submission, usage, image),
+        url: image,
       });
     }
     return images;
   }, []);
+}
+
+function getSubmissionDisplayImage(submission: DropSubmission) {
+  return getNonEmptyString(submission.display_image_url) || getNonEmptyString(submission.thumbnail_image_url) || getNonEmptyString(submission.image_url);
+}
+
+function getSubmissionThumbnailImage(submission: DropSubmission) {
+  return getNonEmptyString(submission.thumbnail_image_url) || getSubmissionDisplayImage(submission);
+}
+
+function getSubmissionImageCacheKey(submission: DropSubmission, usage: 'display' | 'thumbnail', fallbackUrl: string) {
+  if (usage === 'thumbnail') {
+    return submission.thumbnail_storage_path?.trim() || submission.display_storage_path?.trim() || submission.storage_path?.trim() || fallbackUrl;
+  }
+
+  return submission.display_storage_path?.trim() || submission.storage_path?.trim() || fallbackUrl;
 }
 
 async function prefetchDropImageUrls(images: PrefetchImage[], timeoutMs: number) {
@@ -242,13 +293,31 @@ function areSubmissionImageUrlsEqual(current: DropSubmission[], next: DropSubmis
     return false;
   }
 
-  return current.every((submission, index) => submission.id === next[index]?.id && submission.image_url === next[index]?.image_url);
+  return current.every(
+    (submission, index) =>
+      submission.id === next[index]?.id &&
+      submission.image_url === next[index]?.image_url &&
+      submission.display_image_url === next[index]?.display_image_url &&
+      submission.display_storage_path === next[index]?.display_storage_path &&
+      submission.thumbnail_image_url === next[index]?.thumbnail_image_url &&
+      submission.thumbnail_storage_path === next[index]?.thumbnail_storage_path
+  );
 }
 
-function isNonEmptyString(value: string | null | undefined): value is string {
-  return Boolean(value?.trim());
+function getNonEmptyString(value: string | null | undefined) {
+  return value?.trim() || undefined;
 }
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getRealtimePayloadUserId(payload: { new?: unknown; old?: unknown }) {
+  const next = payload.new && typeof payload.new === 'object' ? (payload.new as { user_id?: unknown }).user_id : null;
+  if (typeof next === 'string') {
+    return next;
+  }
+
+  const previous = payload.old && typeof payload.old === 'object' ? (payload.old as { user_id?: unknown }).user_id : null;
+  return typeof previous === 'string' ? previous : null;
 }

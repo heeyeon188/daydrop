@@ -7,12 +7,15 @@ export function useMyCouple(enabled: boolean) {
   const [couple, setCouple] = React.useState<MyCouple | null>(null);
   const [latestDisconnectedCouple, setLatestDisconnectedCouple] = React.useState<Couple | null>(null);
   const [loading, setLoading] = React.useState(false);
+  const [loadedOnce, setLoadedOnce] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const hasLoaded = !enabled || loadedOnce;
 
   const refetch = React.useCallback(async () => {
     if (!enabled) {
       setCouple(null);
       setLatestDisconnectedCouple(null);
+      setLoadedOnce(false);
       return;
     }
 
@@ -25,6 +28,7 @@ export function useMyCouple(enabled: boolean) {
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Could not load couple details.');
     } finally {
+      setLoadedOnce(true);
       setLoading(false);
     }
   }, [enabled]);
@@ -50,6 +54,7 @@ export function useMyCouple(enabled: boolean) {
   return {
     couple,
     latestDisconnectedCouple,
+    hasLoaded,
     loading,
     error,
     refetch,

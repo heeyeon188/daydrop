@@ -210,11 +210,11 @@ export default function MissionScreen() {
     return <AuthScreen language={language} />;
   }
 
-  if (profileState.loading) {
+  if (!profileState.hasLoaded) {
     return <AppLoadingScreen />;
   }
 
-  if (myCouple.loading && !myCouple.couple) {
+  if (!myCouple.hasLoaded) {
     return <AppLoadingScreen />;
   }
 
@@ -281,7 +281,7 @@ function MissionContent({
   profile: Profile;
 }) {
   const t = getTranslations(language);
-  const { today, recentDrops, loading, refreshing, error, applyLocalSubmission, refetch } = useTodayDrop(true, myCouple?.couple.id);
+  const { today, recentDrops, hasLoaded: todayDropHasLoaded, refreshing, error, applyLocalSubmission, removeLocalSubmission, refetch } = useTodayDrop(true, myCouple?.couple.id, myUserId);
   const [deletingPhoto, setDeletingPhoto] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const [fullImage, setFullImage] = React.useState<FullImage | null>(null);
@@ -350,7 +350,7 @@ function MissionContent({
 
     visibleRecentDrops.forEach((drop) => {
       drop.drop_submissions.forEach((submission) => {
-        const image = getSubmissionDisplayImage(submission);
+        const image = getSubmissionThumbnailImage(submission);
         if (image) {
           urls.add(image);
         }
@@ -463,13 +463,45 @@ function MissionContent({
       return;
     }
 
+    const coupleId = today.daily_drop.couple_id ?? today.couple?.id;
+    if (!coupleId) {
+      Alert.alert(t.uploadError, t.unknownError);
+      return;
+    }
+
+    let localSubmission: DropSubmission | null = null;
+    let normalizeTimerStarted = false;
+    let uploadTimerStarted = false;
+
     try {
       setUploading(true);
+      if (__DEV__) {
+        console.time('[photo] local preview after use');
+      }
+      localSubmission = createLocalPhotoSubmission({
+        asset,
+        coupleId,
+        dropId: today.daily_drop.id,
+        userId: myUserId,
+      });
+      applyLocalSubmission(localSubmission);
+      setCameraVisible(false);
+      if (__DEV__) {
+        console.timeEnd('[photo] local preview after use');
+        console.time('[photo] normalize before upload');
+        normalizeTimerStarted = true;
+      }
       const picked = await normalizeCameraPhoto(asset, source);
+      if (__DEV__) {
+        console.timeEnd('[photo] normalize before upload');
+        normalizeTimerStarted = false;
+        console.time('[photo] upload and db save');
+        uploadTimerStarted = true;
+      }
 
       const submission = await submitDropPhoto({
-        base64: picked.base64 ?? '',
-        coupleId: today.daily_drop.couple_id ?? today.couple?.id,
+        base64: picked.base64,
+        coupleId,
         dropId: today.daily_drop.id,
         fileInfo: {
           base64Used: Boolean(picked.base64),
@@ -485,13 +517,24 @@ function MissionContent({
           uri: picked.uri,
           width: picked.width,
         },
+        onDisplayImageReady: applyLocalSubmission,
         userId: myUserId,
         shouldNotifyPartner: hasPartner,
       });
+      if (__DEV__) {
+        console.timeEnd('[photo] upload and db save');
+        uploadTimerStarted = false;
+      }
       applyLocalSubmission(submission);
-      setCameraVisible(false);
-      void refetch(true);
     } catch (nextError) {
+      if (__DEV__) {
+        if (normalizeTimerStarted) {
+          console.timeEnd('[photo] normalize before upload');
+        }
+        if (uploadTimerStarted) {
+          console.timeEnd('[photo] upload and db save');
+        }
+      }
       const message = nextError instanceof Error ? nextError.message : '';
       if (message === 'photo_permission_denied') {
         Alert.alert(t.photoPermission, language === 'ko' ? '설정에서 카메라 권한을 허용해주세요.' : 'Please allow camera access in Settings.', [
@@ -502,6 +545,10 @@ function MissionContent({
         console.error('submitDropPhoto failed', nextError);
         Alert.alert(t.uploadError, message === 'photo_read_failed' ? t.photoReadError : t.unknownError);
       }
+      if (localSubmission) {
+        removeLocalSubmission(localSubmission.id);
+      }
+      void refetch(true);
     } finally {
       setUploading(false);
     }
@@ -597,7 +644,7 @@ function MissionContent({
     await refetch(true);
   };
 
-  if (loading && !today) {
+  if (!todayDropHasLoaded) {
     return <AppLoadingScreen />;
   }
 
@@ -639,7 +686,7 @@ function MissionContent({
                   onLockedPartnerPress={openLockedPartner}
                   onOpenImage={setFullImage}
                   onUploadPress={handleUpload}
-                  deletingPhoto={deletingPhoto}
+                  deletingPhoto={deletingPhoto || uploading}
                   hasPartner={hasPartner}
                   state={state}
                   t={t}
@@ -825,6 +872,7 @@ function DaydropCameraModal({
   const [cameraReady, setCameraReady] = React.useState(false);
   const [capturing, setCapturing] = React.useState(false);
   const [defaultBackLens, setDefaultBackLens] = React.useState<string | undefined>(undefined);
+  const [previewLayout, setPreviewLayout] = React.useState<ImageSize | null>(null);
   const cameraRef = React.useRef<CameraView>(null);
   const hasPermission = permission?.granted === true;
   const shutterDisabled = !hasPermission || !cameraReady || capturing || submitting;
@@ -837,6 +885,7 @@ function DaydropCameraModal({
       setCameraReady(false);
       setFlash('off');
       setFacing('back');
+      setPreviewLayout(null);
     }
   }, [visible]);
 
@@ -864,9 +913,28 @@ function DaydropCameraModal({
     }
   }, []);
 
+  const handlePreviewLayout = React.useCallback(
+    (event: LayoutChangeEvent) => {
+      const { height, width } = event.nativeEvent.layout;
+      setPreviewLayout((current) => (current && Math.round(current.width) === Math.round(width) && Math.round(current.height) === Math.round(height) ? current : { height, width }));
+
+      if (__DEV__) {
+        console.log('[DaydropCamera] preview layout', {
+          facing,
+          height,
+          mode: captured ? 'post-capture' : 'camera',
+          ratio: width > 0 && height > 0 ? width / height : null,
+          width,
+        });
+      }
+    },
+    [captured, facing]
+  );
+
   const capturePhoto = async () => {
     const camera = cameraRef.current;
     const captureFacing: CameraFacing = facing === 'front' ? 'front' : 'back';
+    let captureTimerStarted = false;
 
     if (!camera || shutterDisabled) {
       if (__DEV__) {
@@ -887,53 +955,69 @@ function DaydropCameraModal({
       if (__DEV__) {
         console.log('[DaydropCamera] capture start', { facing: captureFacing });
       }
+      if (__DEV__) {
+        console.time('[DaydropCamera] takePictureAsync');
+        captureTimerStarted = true;
+      }
       const photo = await camera.takePictureAsync({
-        base64: true,
         exif: true,
         quality: 1,
       });
+      if (__DEV__) {
+        console.timeEnd('[DaydropCamera] takePictureAsync');
+        captureTimerStarted = false;
+      }
 
-      if (!photo?.base64) {
+      if (!photo?.uri) {
         throw new Error('photo_read_failed');
       }
 
-      const normalized = await normalizeCameraPhoto(
-        {
-          base64: photo.base64,
-          exif: {
-            ...(photo.exif ?? {}),
-            daydropCaptureSource: captureFacing,
-          },
-          height: photo.height,
-          mimeType: 'image/jpeg',
-          uri: photo.uri,
-          width: photo.width,
+      const capturedPhoto: DaydropPhotoAsset & { didFlip?: boolean; mirrorMode?: string; source: CameraFacing } = {
+        base64: null,
+        exif: {
+          ...(photo.exif ?? {}),
+          daydropCaptureSource: captureFacing,
+          daydropMirrorNormalized: captureFacing === 'front',
         },
-        captureFacing
-      );
+        height: photo.height,
+        mimeType: 'image/jpeg',
+        uri: photo.uri,
+        uploadUri: photo.uri,
+        width: photo.width,
+        source: captureFacing,
+        compressed: false,
+        didFlip: false,
+        mirrorMode: 'none',
+        reencoded: false,
+        resized: false,
+      };
 
+      setCaptured(capturedPhoto);
       if (__DEV__) {
-        console.log('[DaydropCamera] captured', {
-          facing: captureFacing,
-          capturedUri: photo.uri,
-          uploadUri: normalized.uploadUri ?? normalized.uri,
-          originalWidth: photo.width,
-          originalHeight: photo.height,
-          width: normalized.width,
-          height: normalized.height,
-          base64Used: Boolean(normalized.base64),
-          orientation: normalized.exif?.Orientation ?? normalized.exif?.orientation ?? null,
-          mirrorMode: normalized.mirrorMode ?? 'none',
-          resizeApplied: normalized.resized === true,
-          compressApplied: normalized.compressed === true,
-          reencodeApplied: normalized.reencoded === true,
-          didFlip: normalized.didFlip === true,
-          fileSize: await getLocalFileSize(normalized.uploadUri ?? normalized.uri),
+        void getLocalFileSize(capturedPhoto.uploadUri ?? capturedPhoto.uri).then((fileSize) => {
+          console.log('[DaydropCamera] captured', {
+            facing: captureFacing,
+            capturedUri: photo.uri,
+            uploadUri: capturedPhoto.uploadUri ?? capturedPhoto.uri,
+            originalWidth: photo.width,
+            originalHeight: photo.height,
+            width: capturedPhoto.width,
+            height: capturedPhoto.height,
+            base64Used: false,
+            orientation: getExifOrientation(photo.exif),
+            mirrorMode: capturedPhoto.mirrorMode ?? 'none',
+            resizeApplied: false,
+            compressApplied: false,
+            reencodeApplied: false,
+            didFlip: false,
+            fileSize,
+          });
         });
       }
-
-      setCaptured({ ...normalized, source: captureFacing });
     } catch (nextError) {
+      if (__DEV__ && captureTimerStarted) {
+        console.timeEnd('[DaydropCamera] takePictureAsync');
+      }
       console.error('[DaydropCamera] capture error', { facing: captureFacing, error: nextError });
       console.error('custom camera capture failed', nextError);
       Alert.alert(language === 'ko' ? '사진을 찍지 못했어요.' : 'Could not take photo', language === 'ko' ? '다시 시도해주세요.' : 'Please try again.');
@@ -980,6 +1064,25 @@ function DaydropCameraModal({
   const topMission = mission || (language === 'ko' ? '오늘의 Mission' : "Today's Mission");
   const permissionText = language === 'ko' ? '사진을 보내려면 카메라 권한이 필요해요.' : 'Camera permission is needed to send a photo.';
   const permissionButtonText = language === 'ko' ? '카메라 권한 허용하기' : 'Allow camera permission';
+  const capturedAspectRatio = captured?.width && captured.height ? captured.width / captured.height : null;
+  const previewAspectRatio = previewLayout?.width && previewLayout.height ? previewLayout.width / previewLayout.height : null;
+
+  React.useEffect(() => {
+    if (!__DEV__ || !captured || !previewLayout) {
+      return;
+    }
+
+    console.log('[DaydropCamera] post-capture display', {
+      contentFit: 'contain',
+      imageHeight: captured.height,
+      imageRatio: capturedAspectRatio,
+      imageWidth: captured.width,
+      previewHeight: previewLayout.height,
+      previewRatio: previewAspectRatio,
+      previewWidth: previewLayout.width,
+      uri: captured.uri,
+    });
+  }, [captured, capturedAspectRatio, previewAspectRatio, previewLayout]);
 
   return (
     <Modal animationType="slide" onRequestClose={onClose} presentationStyle="fullScreen" visible={visible}>
@@ -1023,9 +1126,23 @@ function DaydropCameraModal({
           </View>
         ) : (
           <>
-            <View style={styles.cameraPreviewShell}>
+            <View onLayout={handlePreviewLayout} style={styles.cameraPreviewShell}>
               {captured ? (
-                <RNImage resizeMode="cover" source={{ uri: captured.uri }} style={styles.cameraPreview} />
+                <RNImage
+                  onLoad={({ nativeEvent }) => {
+                    if (__DEV__) {
+                      console.log('[DaydropCamera] post-capture image load', {
+                        displayFit: 'contain',
+                        sourceHeight: nativeEvent.source.height,
+                        sourceRatio: nativeEvent.source.width > 0 && nativeEvent.source.height > 0 ? nativeEvent.source.width / nativeEvent.source.height : null,
+                        sourceWidth: nativeEvent.source.width,
+                      });
+                    }
+                  }}
+                  resizeMode="contain"
+                  source={{ uri: captured.uri }}
+                  style={styles.cameraPreview}
+                />
               ) : (
                 <CameraView
                   key={`daydrop-camera-${facing}`}
@@ -1036,6 +1153,7 @@ function DaydropCameraModal({
                   flash={flash}
                   mirror={facing === 'front'}
                   mode="picture"
+                  responsiveOrientationWhenOrientationLocked
                   selectedLens={selectedLens}
                   onAvailableLensesChanged={({ lenses }) => {
                     if (facing === 'back') {
@@ -1052,6 +1170,11 @@ function DaydropCameraModal({
                     }
                     if (__DEV__) {
                       void logAvailablePictureSizes(cameraRef.current, facing);
+                    }
+                  }}
+                  onResponsiveOrientationChanged={({ orientation }) => {
+                    if (__DEV__) {
+                      console.log('[DaydropCamera] responsive orientation', { facing, orientation });
                     }
                   }}
                   style={styles.cameraPreview}
@@ -1124,6 +1247,12 @@ async function logAvailablePictureSizes(camera: CameraView | null, facing: Camer
   } catch (error) {
     console.warn('[DaydropCamera] picture size lookup failed', { facing, error });
   }
+}
+
+function getExifOrientation(exif?: Record<string, unknown> | null) {
+  const orientation = exif?.Orientation ?? exif?.orientation;
+  const normalized = typeof orientation === 'string' ? Number.parseInt(orientation, 10) : orientation;
+  return typeof normalized === 'number' && Number.isFinite(normalized) ? normalized : null;
 }
 
 function PartnerPill({ count, onPress }: { count: number; onPress: () => void }) {
@@ -1337,7 +1466,45 @@ function getSubmissionState(submissions: DropSubmission[], myUserId: string): Dr
 }
 
 function getSubmissionDisplayImage(submission: DropSubmission | null | undefined) {
-  return submission?.display_image_url?.trim() || submission?.image_url?.trim() || undefined;
+  return getNonEmptyString(submission?.display_image_url) || getNonEmptyString(submission?.thumbnail_image_url) || getNonEmptyString(submission?.image_url);
+}
+
+function getSubmissionThumbnailImage(submission: DropSubmission | null | undefined) {
+  return getNonEmptyString(submission?.thumbnail_image_url) || getSubmissionDisplayImage(submission);
+}
+
+function getNonEmptyString(value: string | null | undefined) {
+  return value?.trim() || undefined;
+}
+
+function createLocalPhotoSubmission({
+  asset,
+  coupleId,
+  dropId,
+  userId,
+}: {
+  asset: DaydropPhotoAsset;
+  coupleId: string;
+  dropId: string;
+  userId: string;
+}): DropSubmission {
+  const submittedAt = new Date().toISOString();
+  const localPath = `local://${dropId}/${userId}/${Date.now()}`;
+
+  return {
+    id: localPath,
+    drop_id: dropId,
+    couple_id: coupleId,
+    user_id: userId,
+    display_image_url: asset.uri,
+    display_storage_path: localPath,
+    image_url: asset.uri,
+    storage_path: localPath,
+    thumbnail_image_url: asset.uri,
+    thumbnail_storage_path: localPath,
+    note: null,
+    submitted_at: submittedAt,
+  };
 }
 
 function getStateCopy(state: DropState, t: Copy, hasPartner: boolean) {
@@ -1579,8 +1746,8 @@ function RecentDropRow({
 }) {
   const { mine, partner } = React.useMemo(() => splitSubmissions(drop.drop_submissions, myUserId), [drop.drop_submissions, myUserId]);
   const shouldLock = hasPartner && !mine && Boolean(partner);
-  const mineImage = getSubmissionDisplayImage(mine);
-  const partnerImage = getSubmissionDisplayImage(partner);
+  const mineImage = getSubmissionThumbnailImage(mine);
+  const partnerImage = getSubmissionThumbnailImage(partner);
   const mineSize = useImageSize(mineImage);
   const partnerSize = useImageSize(partnerImage);
   const mineHeight = calculateImageHeight(RECENT_THUMB_SLOT_WIDTH, mineSize, RECENT_THUMB_DEFAULT_HEIGHT);
@@ -1742,8 +1909,8 @@ function AllDropRow({
 }) {
   const { mine, partner } = React.useMemo(() => splitSubmissions(drop.drop_submissions, myUserId), [drop.drop_submissions, myUserId]);
   const shouldLock = hasPartner && !mine && Boolean(partner);
-  const mineImage = getSubmissionDisplayImage(mine);
-  const partnerImage = getSubmissionDisplayImage(partner);
+  const mineImage = getSubmissionThumbnailImage(mine);
+  const partnerImage = getSubmissionThumbnailImage(partner);
 
   return (
     <Pressable onPress={onPress} style={styles.allDropRow}>

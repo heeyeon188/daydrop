@@ -2,6 +2,7 @@ import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native
 import { router, Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import * as Notifications from 'expo-notifications';
+import * as SplashScreen from 'expo-splash-screen';
 import React from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
@@ -16,6 +17,19 @@ import {
   selectCoupleFromPushIfNeeded,
 } from '@/services/notifications';
 
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
+
+SplashScreen.preventAutoHideAsync().catch(() => {
+  // The native splash may already be hidden in development reloads.
+});
+
 export const unstable_settings = {
   anchor: '(tabs)',
 };
@@ -25,6 +39,16 @@ export default function RootLayout() {
   const { user, loading } = useSession();
   const lastRegisteredUserIdRef = React.useRef<string | null>(null);
   const lastHandledNotificationIdRef = React.useRef<string | null>(null);
+  const nativeSplashHiddenRef = React.useRef(false);
+
+  const handleRootLayout = React.useCallback(() => {
+    if (nativeSplashHiddenRef.current) {
+      return;
+    }
+
+    nativeSplashHiddenRef.current = true;
+    void SplashScreen.hideAsync();
+  }, []);
 
   React.useEffect(() => {
     let isMounted = true;
@@ -96,7 +120,7 @@ export default function RootLayout() {
   }, [loading, user]);
 
   return (
-    <GestureHandlerRootView style={{ flex: 1 }}>
+    <GestureHandlerRootView onLayout={handleRootLayout} style={{ flex: 1 }}>
       <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
         <Stack screenOptions={{ headerBackButtonDisplayMode: 'minimal' }}>
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />

@@ -6,11 +6,14 @@ import type { Profile } from '@/types/daydrop';
 export function useProfile(userId?: string | null) {
   const [profile, setProfile] = React.useState<Profile | null>(null);
   const [loading, setLoading] = React.useState(false);
+  const [loadedUserId, setLoadedUserId] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const hasLoaded = !userId || loadedUserId === userId;
 
   const refetch = React.useCallback(async () => {
     if (!userId) {
       setProfile(null);
+      setLoadedUserId(null);
       return;
     }
 
@@ -21,6 +24,7 @@ export function useProfile(userId?: string | null) {
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : 'Could not load profile.');
     } finally {
+      setLoadedUserId(userId);
       setLoading(false);
     }
   }, [userId]);
@@ -31,6 +35,7 @@ export function useProfile(userId?: string | null) {
 
   return {
     error,
+    hasLoaded,
     loading,
     profile,
     refetch,

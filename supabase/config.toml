@@ -6,3 +6,6 @@ verify_jwt = true
 
 [functions.send-daily-question-push]
 verify_jwt = false
+
+[functions.cleanup-original-photos]
+verify_jwt = false

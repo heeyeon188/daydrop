@@ -9,6 +9,8 @@ import { supabase } from '@/lib/supabase';
 export const DROP_PHOTOS_BUCKET = 'daydrop-photos';
 const DISPLAY_MAX_LONG_EDGE = 1600;
 const DISPLAY_JPEG_QUALITY = 0.88;
+const THUMBNAIL_MAX_LONG_EDGE = 640;
+const THUMBNAIL_JPEG_QUALITY = 0.84;
 const SIGNED_URL_TTL_SECONDS = 60 * 60;
 const SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const signedUrlCache = new Map<string, { expiresAt: number; url: string }>();
@@ -27,6 +29,20 @@ export type DaydropPhotoAsset = {
   width: number;
 };
 
+export type DropImageFileInfo = {
+  capturedUri?: string;
+  height: number;
+  mimeType?: string;
+  uploadUri?: string;
+  width: number;
+  originalHeight?: number;
+  originalWidth?: number;
+  base64Used?: boolean;
+  compressApplied?: boolean;
+  resizeApplied?: boolean;
+  reencodeApplied?: boolean;
+};
+
 type NormalizedPhotoAsset = DaydropPhotoAsset & {
   compressed?: boolean;
   didFlip?: boolean;
@@ -41,9 +57,7 @@ type MirrorMode = 'none' | 'front-preview-match' | 'exif-mirrored';
 const imagePickerOptions: ImagePicker.ImagePickerOptions = {
   mediaTypes: ['images'],
   allowsEditing: false,
-  exif: true,
   quality: 1,
-  base64: true,
 };
 
 export async function pickImageFromLibrary() {
@@ -59,7 +73,7 @@ export async function pickImageFromLibrary() {
   }
 
   const asset = result.assets[0];
-  if (!asset?.base64) {
+  if (!asset?.uri) {
     throw new Error('photo_read_failed');
   }
 
@@ -82,7 +96,7 @@ export async function takePhotoWithCamera(cameraFacing: CameraFacing = 'front') 
   }
 
   const asset = result.assets[0];
-  if (!asset?.base64) {
+  if (!asset?.uri) {
     throw new Error('photo_read_failed');
   }
 
@@ -146,18 +160,14 @@ async function normalizePickedImage(
 
   const image = await ImageManipulator.manipulate(asset.uri).flip(FlipType.Horizontal).renderAsync();
   const saved = await image.saveAsync({
-    base64: true,
+    base64: false,
     compress: 1,
     format: SaveFormat.JPEG,
   });
 
-  if (!saved.base64) {
-    throw new Error('photo_read_failed');
-  }
-
   const normalized = {
     ...asset,
-    base64: saved.base64,
+    base64: null,
     exif: {
       ...asset.exif,
       Orientation: 1,
@@ -216,27 +226,16 @@ export async function uploadDropImage({
   fileInfo,
   userId,
 }: {
-  base64: string;
+  base64?: string | null;
   coupleId: string;
   dropId: string;
-  fileInfo?: {
-    capturedUri?: string;
-    height: number;
-    mimeType?: string;
-    uploadUri?: string;
-    width: number;
-    originalHeight?: number;
-    originalWidth?: number;
-    base64Used?: boolean;
-    compressApplied?: boolean;
-    resizeApplied?: boolean;
-    reencodeApplied?: boolean;
-  };
+  fileInfo?: DropImageFileInfo;
   userId: string;
 }) {
   const timestamp = Date.now();
   const storagePath = `couples/${coupleId}/drops/${dropId}/${userId}-${timestamp}.jpg`;
   const displayStoragePath = `couples/${coupleId}/drops/${dropId}/display/${userId}-${timestamp}.jpg`;
+  const thumbnailStoragePath = `couples/${coupleId}/drops/${dropId}/thumbnail/${userId}-${timestamp}.jpg`;
   let uploadData: ArrayBuffer | null = null;
   let base64Used = false;
 
@@ -251,6 +250,9 @@ export async function uploadDropImage({
     }
   }
   if (!uploadData) {
+    if (!base64) {
+      throw new Error('photo_read_failed');
+    }
     uploadData = decode(base64);
     base64Used = true;
   }
@@ -278,10 +280,20 @@ export async function uploadDropImage({
     });
   }
 
-  const { error } = await supabase.storage.from(DROP_PHOTOS_BUCKET).upload(storagePath, uploadData, {
-    contentType: originalContentType,
-    upsert: false,
-  });
+  if (__DEV__) {
+    console.time('[photo] original storage upload');
+  }
+  const { error } = await supabase.storage
+    .from(DROP_PHOTOS_BUCKET)
+    .upload(storagePath, uploadData, {
+      contentType: originalContentType,
+      upsert: false,
+    })
+    .finally(() => {
+      if (__DEV__) {
+        console.timeEnd('[photo] original storage upload');
+      }
+    });
 
   if (error) {
     throw error;
@@ -301,121 +313,175 @@ export async function uploadDropImage({
     });
   }
 
-  const displayUpload = await uploadDisplayImage({
-    displayStoragePath,
-    fileInfo,
-  }).catch((displayError) => {
-    console.warn('[photo] display image upload failed; using original image for display fallback', {
-      displayStoragePath,
-      error: displayError,
-    });
-    return null;
-  });
-
   return {
-    displayImageUrl: displayUpload ? await createUploadImageUrl(displayUpload.storagePath) : null,
-    displayStoragePath: displayUpload?.storagePath ?? null,
+    displayStoragePath,
+    thumbnailStoragePath,
     storagePath,
     imageUrl: await createUploadImageUrl(storagePath),
   };
 }
 
-async function uploadDisplayImage({
+export async function uploadDropDisplayImage({
   displayStoragePath,
   fileInfo,
 }: {
   displayStoragePath: string;
-  fileInfo?: {
-    capturedUri?: string;
-    height: number;
-    mimeType?: string;
-    uploadUri?: string;
-    width: number;
-    originalHeight?: number;
-    originalWidth?: number;
-    base64Used?: boolean;
-    compressApplied?: boolean;
-    resizeApplied?: boolean;
-    reencodeApplied?: boolean;
-  };
+  fileInfo?: DropImageFileInfo;
 }) {
-  const displayImage = await prepareDisplayImage(fileInfo);
-  if (!displayImage) {
+  const displayUpload = await uploadOptimizedImage({
+    fileInfo,
+    maxLongEdge: DISPLAY_MAX_LONG_EDGE,
+    quality: DISPLAY_JPEG_QUALITY,
+    storagePath: displayStoragePath,
+    timerName: 'display',
+  });
+  if (!displayUpload) {
     return null;
   }
 
-  const displayData = await readFileAsArrayBuffer(displayImage.uri);
-  const { error } = await supabase.storage.from(DROP_PHOTOS_BUCKET).upload(displayStoragePath, displayData, {
-    contentType: 'image/jpeg',
-    upsert: false,
+  return {
+    displayImageUrl: await createUploadImageUrl(displayUpload.storagePath),
+    displayStoragePath: displayUpload.storagePath,
+  };
+}
+
+export async function uploadDropThumbnailImage({
+  fileInfo,
+  thumbnailStoragePath,
+}: {
+  fileInfo?: DropImageFileInfo;
+  thumbnailStoragePath: string;
+}) {
+  const thumbnailUpload = await uploadOptimizedImage({
+    fileInfo,
+    maxLongEdge: THUMBNAIL_MAX_LONG_EDGE,
+    quality: THUMBNAIL_JPEG_QUALITY,
+    storagePath: thumbnailStoragePath,
+    timerName: 'thumbnail',
   });
+  if (!thumbnailUpload) {
+    return null;
+  }
+
+  return {
+    thumbnailImageUrl: await createUploadImageUrl(thumbnailUpload.storagePath),
+    thumbnailStoragePath: thumbnailUpload.storagePath,
+  };
+}
+
+async function uploadOptimizedImage({
+  fileInfo,
+  maxLongEdge,
+  quality,
+  storagePath,
+  timerName,
+}: {
+  fileInfo?: DropImageFileInfo;
+  maxLongEdge: number;
+  quality: number;
+  storagePath: string;
+  timerName: 'display' | 'thumbnail';
+}) {
+  const optimizedImage = await prepareOptimizedImage({
+    fileInfo,
+    maxLongEdge,
+    quality,
+    timerName,
+  });
+  if (!optimizedImage) {
+    return null;
+  }
+
+  const imageData = await readFileAsArrayBuffer(optimizedImage.uri);
+  if (__DEV__) {
+    console.time(`[photo] ${timerName} upload`);
+  }
+  const { error } = await supabase.storage
+    .from(DROP_PHOTOS_BUCKET)
+    .upload(storagePath, imageData, {
+      contentType: 'image/jpeg',
+      upsert: false,
+    })
+    .finally(() => {
+      if (__DEV__) {
+        console.timeEnd(`[photo] ${timerName} upload`);
+      }
+    });
 
   if (error) {
     throw error;
   }
 
   if (__DEV__) {
-    console.log('[photo] uploaded display image', {
+    console.log(`[photo] uploaded ${timerName} image`, {
       bucket: DROP_PHOTOS_BUCKET,
-      storagePath: displayStoragePath,
+      storagePath,
       contentType: 'image/jpeg',
-      byteLength: displayData.byteLength,
-      uploadWidth: displayImage.width,
-      uploadHeight: displayImage.height,
+      byteLength: imageData.byteLength,
+      uploadWidth: optimizedImage.width,
+      uploadHeight: optimizedImage.height,
       compressApplied: true,
-      resizeApplied: displayImage.resizeApplied,
+      resizeApplied: optimizedImage.resizeApplied,
       reencodeApplied: true,
     });
   }
 
-  return { storagePath: displayStoragePath };
+  return { storagePath };
 }
 
-async function prepareDisplayImage(fileInfo?: {
-  capturedUri?: string;
-  height: number;
-  mimeType?: string;
-  uploadUri?: string;
-  width: number;
-  originalHeight?: number;
-  originalWidth?: number;
-  base64Used?: boolean;
-  compressApplied?: boolean;
-  resizeApplied?: boolean;
-  reencodeApplied?: boolean;
+async function prepareOptimizedImage({
+  fileInfo,
+  maxLongEdge,
+  quality,
+  timerName,
+}: {
+  fileInfo?: DropImageFileInfo;
+  maxLongEdge: number;
+  quality: number;
+  timerName: 'display' | 'thumbnail';
 }) {
   const sourceUri = fileInfo?.uploadUri;
   if (!sourceUri) {
     return null;
   }
 
-  const longEdge = Math.max(fileInfo.width, fileInfo.height);
-  const resizeApplied = longEdge > DISPLAY_MAX_LONG_EDGE;
-  const context = ImageManipulator.manipulate(sourceUri);
-
-  if (resizeApplied) {
-    if (fileInfo.width >= fileInfo.height) {
-      context.resize({ width: DISPLAY_MAX_LONG_EDGE });
-    } else {
-      context.resize({ height: DISPLAY_MAX_LONG_EDGE });
-    }
+  if (__DEV__) {
+    console.time(`[photo] ${timerName} image generation`);
   }
 
-  const image = await context.renderAsync();
-  const saved = await image.saveAsync({
-    base64: false,
-    compress: DISPLAY_JPEG_QUALITY,
-    format: SaveFormat.JPEG,
-  });
+  try {
+    const longEdge = Math.max(fileInfo.width, fileInfo.height);
+    const resizeApplied = longEdge > maxLongEdge;
+    const context = ImageManipulator.manipulate(sourceUri);
 
-  return {
-    uri: saved.uri,
-    width: saved.width,
-    height: saved.height,
-    compressApplied: true,
-    resizeApplied,
-    reencodeApplied: true,
-  };
+    if (resizeApplied) {
+      if (fileInfo.width >= fileInfo.height) {
+        context.resize({ width: maxLongEdge });
+      } else {
+        context.resize({ height: maxLongEdge });
+      }
+    }
+
+    const image = await context.renderAsync();
+    const saved = await image.saveAsync({
+      base64: false,
+      compress: quality,
+      format: SaveFormat.JPEG,
+    });
+
+    return {
+      uri: saved.uri,
+      width: saved.width,
+      height: saved.height,
+      compressApplied: true,
+      resizeApplied,
+      reencodeApplied: true,
+    };
+  } finally {
+    if (__DEV__) {
+      console.timeEnd(`[photo] ${timerName} image generation`);
+    }
+  }
 }
 
 function getImageContentType(mimeType?: string | null) {
@@ -443,7 +509,18 @@ export async function createPhotoSignedUrl(storagePath: string) {
     return cached.url;
   }
 
-  const { data, error } = await supabase.storage.from(DROP_PHOTOS_BUCKET).createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
+  const signedUrlTimerLabel = `[photo] signed URL generation ${storagePath}`;
+  if (__DEV__) {
+    console.time(signedUrlTimerLabel);
+  }
+  const { data, error } = await supabase.storage
+    .from(DROP_PHOTOS_BUCKET)
+    .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS)
+    .finally(() => {
+      if (__DEV__) {
+        console.timeEnd(signedUrlTimerLabel);
+      }
+    });
   if (error) {
     throw error;
   }

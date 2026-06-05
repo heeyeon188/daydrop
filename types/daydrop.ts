@@ -72,7 +72,11 @@ export type DropSubmission = {
   display_image_url: string | null;
   display_storage_path: string | null;
   image_url: string;
+  original_deleted_at?: string | null;
+  original_deleted_reason?: string | null;
   storage_path: string;
+  thumbnail_image_url: string | null;
+  thumbnail_storage_path: string | null;
   note: string | null;
   submitted_at: string;
 };
