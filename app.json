@@ -10,7 +10,7 @@
     "ios": {
       "supportsTablet": false,
       "usesAppleSignIn": true,
-       "buildNumber": "1",
+      "buildNumber": "2",
       "infoPlist": {
         "NSCameraUsageDescription": "Daydrop uses the camera so you can take and share your daily photo.",
         "NSPhotoLibraryUsageDescription": "Daydrop uses your photo library so you can choose a daily photo to share.",
