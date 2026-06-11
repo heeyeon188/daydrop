@@ -16,7 +16,7 @@ import {
   View,
 } from 'react-native';
 
-import { getTranslations, normalizeLanguage } from '@/lib/i18n';
+import { getPreferredOrDeviceLanguage, getTranslations } from '@/lib/i18n';
 import { logAppleSignInError, signInWithAppleIdToken, signInWithGoogle, signUpWithEmail } from '@/services/auth';
 
 function isAppleAuthCanceled(error: unknown) {
@@ -25,7 +25,7 @@ function isAppleAuthCanceled(error: unknown) {
 
 export default function SignupScreen() {
   const params = useLocalSearchParams<{ language?: string }>();
-  const language = normalizeLanguage(params.language);
+  const language = getPreferredOrDeviceLanguage(params.language);
   const t = getTranslations(language);
   const [email, setEmail] = React.useState('');
   const [password, setPassword] = React.useState('');

@@ -43,7 +43,7 @@ import { useMyCouple } from '@/hooks/useMyCouple';
 import { useProfile } from '@/hooks/useProfile';
 import { useSession } from '@/hooks/useSession';
 import { useTodayDrop } from '@/hooks/useTodayDrop';
-import { getTranslations, normalizeLanguage, type Language } from '@/lib/i18n';
+import { getPreferredOrDeviceLanguage, getTranslations, normalizeLanguage, type Language } from '@/lib/i18n';
 import { findCountryOption, getCountryLabel, searchCountryOptions } from '@/lib/locations';
 import { deleteAccount } from '@/services/account';
 import { logAppleSignInError, signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut } from '@/services/auth';
@@ -158,7 +158,7 @@ export default function MissionScreen() {
   const { user, loading: sessionLoading, configError } = useSession();
   const profileState = useProfile(user?.id);
   const myCouple = useMyCouple(Boolean(user));
-  const language = normalizeLanguage(profileState.profile?.preferred_language);
+  const language = getPreferredOrDeviceLanguage(profileState.profile?.preferred_language);
   const [pendingInviteCode, setPendingInviteCode] = React.useState<string | null>(null);
 
   React.useEffect(() => {
@@ -873,9 +873,11 @@ function DaydropCameraModal({
   const [capturing, setCapturing] = React.useState(false);
   const [defaultBackLens, setDefaultBackLens] = React.useState<string | undefined>(undefined);
   const [previewLayout, setPreviewLayout] = React.useState<ImageSize | null>(null);
+  const insets = useSafeAreaInsets();
   const cameraRef = React.useRef<CameraView>(null);
   const hasPermission = permission?.granted === true;
   const shutterDisabled = !hasPermission || !cameraReady || capturing || submitting;
+  const cameraControlsPaddingBottom = Math.max(30, insets.bottom + 12);
   const selectedLens = Platform.OS === 'ios' && facing === 'back' ? defaultBackLens : undefined;
 
   React.useEffect(() => {
@@ -1073,7 +1075,7 @@ function DaydropCameraModal({
     }
 
     console.log('[DaydropCamera] post-capture display', {
-      contentFit: 'contain',
+      contentFit: 'cover',
       imageHeight: captured.height,
       imageRatio: capturedAspectRatio,
       imageWidth: captured.width,
@@ -1132,14 +1134,14 @@ function DaydropCameraModal({
                   onLoad={({ nativeEvent }) => {
                     if (__DEV__) {
                       console.log('[DaydropCamera] post-capture image load', {
-                        displayFit: 'contain',
+                        displayFit: 'cover',
                         sourceHeight: nativeEvent.source.height,
                         sourceRatio: nativeEvent.source.width > 0 && nativeEvent.source.height > 0 ? nativeEvent.source.width / nativeEvent.source.height : null,
                         sourceWidth: nativeEvent.source.width,
                       });
                     }
                   }}
-                  resizeMode="contain"
+                  resizeMode="cover"
                   source={{ uri: captured.uri }}
                   style={styles.cameraPreview}
                 />
@@ -1206,7 +1208,7 @@ function DaydropCameraModal({
                 </Pressable>
               </View>
             ) : (
-              <View style={styles.cameraControls}>
+              <View style={[styles.cameraControls, { paddingBottom: cameraControlsPaddingBottom }]}>
                 <Pressable onPress={() => setFlash((current) => (current === 'on' ? 'off' : 'on'))} style={styles.cameraRoundButton}>
                   <Feather name={flash === 'on' ? 'zap' : 'zap-off'} size={22} color="#FFFFFF" strokeWidth={2.1} />
                 </Pressable>
@@ -1779,7 +1781,11 @@ function RecentDropRow({
 function RecentThumb({ height = RECENT_THUMB_DEFAULT_HEIGHT, image, locked, side }: { height?: number; image?: string; locked: boolean; side: 'left' | 'right' }) {
   return (
     <View style={[styles.recentThumb, side === 'left' ? styles.recentThumbLeft : styles.recentThumbRight, { height }]}>
-      {image ? <SafeImage blurRadius={locked ? LOCKED_THUMBNAIL_PHOTO_BLUR_RADIUS : 0} image={image} label={`recent-${side}`} /> : <View style={styles.recentPlaceholder} />}
+      {image ? (
+        <SafeImage blurRadius={locked ? LOCKED_THUMBNAIL_PHOTO_BLUR_RADIUS : 0} image={image} label={`recent-${side}`} resizeMode="cover" />
+      ) : (
+        <View style={styles.recentPlaceholder} />
+      )}
       {locked ? (
         <>
           <View style={styles.recentLock}>

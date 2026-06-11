@@ -1,4 +1,6 @@
-﻿export type Language = 'ko' | 'en';
+import { getLocales } from 'expo-localization';
+
+export type Language = 'ko' | 'en';
 
 type TranslationKey =
   | 'allDrops'
@@ -386,6 +388,18 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
 
 export function normalizeLanguage(value?: string | null): Language {
   return value === 'en' ? 'en' : 'ko';
+}
+
+export function getDeviceDefaultLanguage(): Language {
+  const locale = getLocales()[0];
+  const languageCode = locale?.languageCode?.toLowerCase();
+  const languageTag = locale?.languageTag?.toLowerCase();
+
+  return languageCode === 'ko' || languageTag === 'ko' || languageTag === 'ko-kr' ? 'ko' : 'en';
+}
+
+export function getPreferredOrDeviceLanguage(preferredLanguage?: string | null): Language {
+  return preferredLanguage == null ? getDeviceDefaultLanguage() : normalizeLanguage(preferredLanguage);
 }
 
 export function getTranslations(language?: string | null) {
