@@ -44,7 +44,7 @@ import { useProfile } from '@/hooks/useProfile';
 import { useSession } from '@/hooks/useSession';
 import { useTodayDrop } from '@/hooks/useTodayDrop';
 import { getPreferredOrDeviceLanguage, getTranslations, normalizeLanguage, type Language } from '@/lib/i18n';
-import { normalizeInviteCode, PENDING_INVITE_CODE_STORAGE_KEY } from '@/lib/inviteLink';
+import { getInviteCodeFromQueryParams, normalizeInviteCode, PENDING_INVITE_CODE_STORAGE_KEY } from '@/lib/inviteLink';
 import { findCountryOption, getCountryLabel, searchCountryOptions } from '@/lib/locations';
 import { deleteAccount } from '@/services/account';
 import { logAppleSignInError, signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut } from '@/services/auth';
@@ -78,6 +78,7 @@ const LOCKED_THUMBNAIL_PHOTO_BLUR_RADIUS = 340;
 const HOME_IMAGE_TRANSITION_MS = 180;
 const TODAY_DROP_PENDING_TEXT_COLOR = '#666666';
 const TODAY_DROP_PENDING_ICON_COLOR = '#7890AE';
+const INVITE_LINK_SAVE_DEDUPE_MS = 3000;
 const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
   dailyQuestion: true,
   partnerConnected: true,
@@ -124,7 +125,24 @@ type SafeImageResizeMode = React.ComponentProps<typeof RNImage>['resizeMode'];
 const imageSizeCache = new Map<string, ImageSize>();
 const imageSizeInFlight = new Map<string, Promise<ImageSize>>();
 const IOS_BACK_WIDE_LENS = 'builtInWideAngleCamera';
-const UNSAFE_DEFAULT_BACK_LENSES = new Set(['builtInUltraWideCamera', 'builtInDualWideCamera', 'builtInDualCamera', 'builtInTripleCamera']);
+const IOS_BACK_WIDE_LENS_ALIASES = [IOS_BACK_WIDE_LENS, 'AVCaptureDeviceTypeBuiltInWideAngleCamera'];
+const UNSAFE_DEFAULT_BACK_LENSES = new Set([
+  'AVCaptureDeviceTypeBuiltInDualCamera',
+  'AVCaptureDeviceTypeBuiltInDualWideCamera',
+  'AVCaptureDeviceTypeBuiltInTripleCamera',
+  'AVCaptureDeviceTypeBuiltInUltraWideCamera',
+  'builtInDualCamera',
+  'builtInDualWideCamera',
+  'builtInTripleCamera',
+  'builtInUltraWideCamera',
+]);
+
+type BackLensSelection = {
+  lens: string;
+  reason: string;
+  rejected: { lens: string; reason: string }[];
+  safeCandidates: string[];
+};
 
 const ULTRA_WIDE_BACK_LENS_PATTERNS = ['ultra', '0.5', '초광각'];
 const NON_DEFAULT_BACK_LENS_PATTERNS = [
@@ -143,24 +161,113 @@ const NON_DEFAULT_BACK_LENS_PATTERNS = [
 ];
 const DEFAULT_BACK_LENS_PATTERNS = ['wide angle', 'wide-angle', 'wide', 'back camera', 'camera', '광각', '후면', '카메라'];
 
-function selectDefaultBackLens(lenses: string[]) {
-  if (lenses.includes(IOS_BACK_WIDE_LENS)) {
-    return IOS_BACK_WIDE_LENS;
+function normalizeLensName(lens: string) {
+  return lens.toLowerCase().replace(/[\s._-]+/g, '');
+}
+
+function getUnsafeBackLensReason(lens: string) {
+  const normalized = lens.toLowerCase();
+  const compact = normalizeLensName(lens);
+  const unsafePatterns = [
+    ...ULTRA_WIDE_BACK_LENS_PATTERNS,
+    ...NON_DEFAULT_BACK_LENS_PATTERNS,
+    'ultra',
+    'ultrawide',
+    'ultra-wide',
+    'superwide',
+    'super-wide',
+    '0.5',
+    '0,5',
+    '0 5',
+    '05x',
+    'tele',
+    'telephoto',
+    'dual',
+    'dualwide',
+    'dual-wide',
+    'triple',
+    'lidar',
+    'depth',
+    'true',
+    'truedepth',
+    'true-depth',
+    'desk',
+    'continuity',
+    '초광각',
+    '울트라',
+    '망원',
+    '듀얼',
+    '트리플',
+    '심도',
+  ];
+
+  if (UNSAFE_DEFAULT_BACK_LENSES.has(lens)) {
+    return 'known-non-1x-device-type';
+  }
+
+  const unsafePattern = unsafePatterns.find((pattern) => {
+    const normalizedPattern = pattern.toLowerCase();
+    return normalized.includes(normalizedPattern) || compact.includes(normalizeLensName(pattern));
+  });
+
+  return unsafePattern ? `matched-unsafe-pattern:${unsafePattern}` : null;
+}
+
+function matchesDefaultBackWideLens(lens: string) {
+  const normalized = lens.toLowerCase();
+  const compact = normalizeLensName(lens);
+  const defaultPatterns = [...DEFAULT_BACK_LENS_PATTERNS, 'wideangle', 'wide camera', 'widecamera', 'backcamera', '광각', '와이드', '후면 카메라', '후면카메라'];
+
+  return IOS_BACK_WIDE_LENS_ALIASES.some((candidate) => lens === candidate || compact === normalizeLensName(candidate)) || defaultPatterns.some((pattern) => normalized.includes(pattern.toLowerCase()) || compact.includes(normalizeLensName(pattern)));
+}
+
+function selectDefaultBackLens(lenses: string[]): BackLensSelection {
+  const rejected: BackLensSelection['rejected'] = [];
+  const exactWideLens = IOS_BACK_WIDE_LENS_ALIASES.find((candidate) => lenses.includes(candidate));
+
+  if (exactWideLens) {
+    return {
+      lens: exactWideLens,
+      reason: 'exact-wide-device-type',
+      rejected,
+      safeCandidates: lenses.filter((lens) => !getUnsafeBackLensReason(lens)),
+    };
   }
 
   const safeBackLenses = lenses.filter((lens) => {
-    const normalized = lens.toLowerCase();
-    return (
-      !UNSAFE_DEFAULT_BACK_LENSES.has(lens) &&
-      !ULTRA_WIDE_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern)) &&
-      !NON_DEFAULT_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern))
-    );
+    const unsafeReason = getUnsafeBackLensReason(lens);
+    if (unsafeReason) {
+      rejected.push({ lens, reason: unsafeReason });
+      return false;
+    }
+    return true;
   });
+  const namedWideLens = safeBackLenses.find(matchesDefaultBackWideLens);
 
-  return safeBackLenses.find((lens) => {
-    const normalized = lens.toLowerCase();
-    return DEFAULT_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern));
-  }) ?? safeBackLenses[0];
+  if (namedWideLens) {
+    return {
+      lens: namedWideLens,
+      reason: 'safe-named-wide-lens',
+      rejected,
+      safeCandidates: safeBackLenses,
+    };
+  }
+
+  if (safeBackLenses.length === 1) {
+    return {
+      lens: safeBackLenses[0],
+      reason: 'single-safe-back-lens',
+      rejected,
+      safeCandidates: safeBackLenses,
+    };
+  }
+
+  return {
+    lens: IOS_BACK_WIDE_LENS,
+    reason: 'expo-wide-default-fallback',
+    rejected,
+    safeCandidates: safeBackLenses,
+  };
 }
 
 export default function MissionScreen() {
@@ -169,16 +276,20 @@ export default function MissionScreen() {
   const myCouple = useMyCouple(Boolean(user));
   const language = getPreferredOrDeviceLanguage(profileState.profile?.preferred_language);
   const [pendingInviteCode, setPendingInviteCode] = React.useState<string | null>(null);
+  const lastSavedInviteCodeRef = React.useRef<{ code: string; savedAt: number } | null>(null);
 
   React.useEffect(() => {
     let mounted = true;
 
     const savePendingInviteCode = async (url: string | null) => {
       const nextCode = getInviteCodeFromURL(url);
-      if (!nextCode) {
+      const now = Date.now();
+      const lastSaved = lastSavedInviteCodeRef.current;
+      if (!mounted || !nextCode || (lastSaved?.code === nextCode && now - lastSaved.savedAt < INVITE_LINK_SAVE_DEDUPE_MS)) {
         return;
       }
 
+      lastSavedInviteCodeRef.current = { code: nextCode, savedAt: now };
       setPendingInviteCode(nextCode);
       try {
         await AsyncStorage.setItem(PENDING_INVITE_CODE_STORAGE_KEY, nextCode);
@@ -198,7 +309,9 @@ export default function MissionScreen() {
       });
 
     const subscription = ExpoLinking.addEventListener('url', ({ url }) => {
-      void savePendingInviteCode(url);
+      if (mounted) {
+        void savePendingInviteCode(url);
+      }
     });
 
     return () => {
@@ -306,6 +419,8 @@ function MissionContent({
   const [settingsVisible, setSettingsVisible] = React.useState(false);
   const [storedPendingInviteCode, setStoredPendingInviteCode] = React.useState<string | null>(null);
   const [partnerDisconnectedNoticeVisible, setPartnerDisconnectedNoticeVisible] = React.useState(false);
+  const mountedRef = React.useRef(true);
+  const inviteProcessingRef = React.useRef(false);
   const processedInviteLinkRef = React.useRef<string | null>(null);
   const allDropsSigningRequestRef = React.useRef(0);
   const currentCoupleId = myCouple?.couple.id ?? null;
@@ -372,6 +487,13 @@ function MissionContent({
   const partnerCount = partnerOptions.length;
   const canAddPartner = partnerCount < 4;
   const visibleRecentDrops = React.useMemo(() => scopedRecentDrops.slice(0, HOME_RECENT_DROPS_LIMIT), [scopedRecentDrops]);
+
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   React.useEffect(() => {
     const requestId = allDropsSigningRequestRef.current + 1;
@@ -444,8 +566,10 @@ function MissionContent({
   }, []);
 
   const clearPendingInviteCode = React.useCallback(() => {
-    setStoredPendingInviteCode(null);
-    onPendingInviteCodeHandled();
+    if (mountedRef.current) {
+      setStoredPendingInviteCode(null);
+      onPendingInviteCodeHandled();
+    }
     AsyncStorage.removeItem(PENDING_INVITE_CODE_STORAGE_KEY).catch((nextError) => {
       console.warn('pending invite code clear failed', nextError);
     });
@@ -453,39 +577,57 @@ function MissionContent({
 
   React.useEffect(() => {
     const nextCode = normalizeInviteCode(activePendingInviteCode);
-    if (!nextCode || processedInviteLinkRef.current === nextCode) {
+    if (!nextCode || inviteProcessingRef.current || processedInviteLinkRef.current === nextCode) {
       return;
     }
 
+    inviteProcessingRef.current = true;
     processedInviteLinkRef.current = nextCode;
     clearPendingInviteCode();
-    setConnectVisible(false);
+    if (mountedRef.current) {
+      setConnectVisible(false);
+    }
 
     const connectFromInviteLink = async () => {
+      let shouldShowSuccess = false;
+
       try {
-        await joinCoupleByInviteCode(nextCode);
-        setFullImage(null);
-        setDropDetail(null);
-        setAllDropsVisible(false);
-        setShareSheetVisible(false);
-        setSettingsVisible(false);
-        setPartnerMenuVisible(false);
-        setCameraVisible(false);
-        setPartnerDisconnectedNoticeVisible(false);
+        const connectedCoupleId = await joinCoupleByInviteCode(nextCode);
+        if (mountedRef.current) {
+          setFullImage(null);
+          setDropDetail(null);
+          setAllDropsVisible(false);
+          setShareSheetVisible(false);
+          setSettingsVisible(false);
+          setPartnerMenuVisible(false);
+          setCameraVisible(false);
+          setPartnerDisconnectedNoticeVisible(false);
+        }
+        if (connectedCoupleId) {
+          await selectCouple(connectedCoupleId);
+        }
         await onCoupleChanged();
-        await refetch(true);
-        router.replace('/');
-        Alert.alert(t.partnerAddedSuccess);
+        shouldShowSuccess = true;
       } catch (nextError) {
         console.error('join invite failed', nextError);
         const inviteErrorType = getJoinInviteErrorType(nextError);
         if (inviteErrorType === 'invalid' || inviteErrorType === 'unknown') {
           processedInviteLinkRef.current = null;
         }
-        if (inviteErrorType !== 'invalid') {
-          router.replace('/');
+        if (inviteErrorType === 'alreadyConnected') {
+          await onCoupleChanged();
         }
-        Alert.alert(t.joinError, getJoinInviteErrorMessage(nextError, t));
+        if (mountedRef.current) {
+          Alert.alert(t.joinError, getJoinInviteErrorMessage(nextError, t));
+        }
+      } finally {
+        inviteProcessingRef.current = false;
+        if (mountedRef.current) {
+          router.replace('/(tabs)');
+          if (shouldShowSuccess) {
+            Alert.alert(t.partnerAddedSuccess);
+          }
+        }
       }
     };
 
@@ -674,7 +816,7 @@ function MissionContent({
       setAllDropsForModal([]);
       onCoupleSelected(coupleId);
       await selectCouple(coupleId);
-      await Promise.all([onCoupleChanged(), refetch(true)]);
+      await onCoupleChanged();
     } catch (nextError) {
       console.error('select couple failed', nextError);
       await onCoupleChanged();
@@ -864,13 +1006,12 @@ function MissionContent({
       <Modal animationType="slide" visible={connectVisible} onRequestClose={() => setConnectVisible(false)}>
         <CoupleConnectScreen
           currentPartnerType={myCouple?.couple.partner_type ?? null}
-          initialInviteCode={activePendingInviteCode}
+          initialInviteCode={null}
           inviteCode={inviteCode}
           invitePartnerType={pendingInviteCouple?.couple.partner_type ?? null}
           language={language}
           onConnected={async () => {
             await onCoupleChanged();
-            await refetch(true);
             Alert.alert(t.partnerAddedSuccess);
           }}
           onClose={() => setConnectVisible(false)}
@@ -925,10 +1066,15 @@ function DaydropCameraModal({
   const [previewLayout, setPreviewLayout] = React.useState<ImageSize | null>(null);
   const insets = useSafeAreaInsets();
   const cameraRef = React.useRef<CameraView>(null);
+  const defaultBackLensRef = React.useRef(defaultBackLens);
   const hasPermission = permission?.granted === true;
   const shutterDisabled = !hasPermission || !cameraReady || capturing || submitting;
   const cameraControlsPaddingBottom = Math.max(30, insets.bottom + 12);
   const selectedLens = Platform.OS === 'ios' && facing === 'back' ? defaultBackLens : undefined;
+
+  React.useEffect(() => {
+    defaultBackLensRef.current = defaultBackLens;
+  }, [defaultBackLens]);
 
   React.useEffect(() => {
     if (!visible) {
@@ -937,6 +1083,8 @@ function DaydropCameraModal({
       setCameraReady(false);
       setFlash('off');
       setFacing('back');
+      defaultBackLensRef.current = IOS_BACK_WIDE_LENS;
+      setDefaultBackLens(IOS_BACK_WIDE_LENS);
       setPreviewLayout(null);
     }
   }, [visible]);
@@ -953,15 +1101,31 @@ function DaydropCameraModal({
         cameraReady,
         isCapturing: capturing,
         hasCameraRef: Boolean(cameraRef.current),
+        selectedLens,
         shutterDisabled,
+        zoom: 0,
       });
     }
-  }, [cameraReady, captured, capturing, facing, hasPermission, shutterDisabled, visible]);
+  }, [cameraReady, captured, capturing, facing, hasPermission, selectedLens, shutterDisabled, visible]);
 
-  const updateDefaultBackLens = React.useCallback((lenses: string[]) => {
-    const nextLens = selectDefaultBackLens(lenses);
-    if (nextLens) {
-      setDefaultBackLens((current) => (current === nextLens ? current : nextLens));
+  const updateDefaultBackLens = React.useCallback((lenses: string[], source: string) => {
+    const selection = selectDefaultBackLens(lenses);
+
+    if (__DEV__) {
+      console.log('[DaydropCamera] back lens selection', {
+        finalLens: selection.lens,
+        lenses,
+        rejected: selection.rejected,
+        reason: selection.reason,
+        safeCandidates: selection.safeCandidates,
+        source,
+        zoom: 0,
+      });
+    }
+
+    if (defaultBackLensRef.current !== selection.lens) {
+      defaultBackLensRef.current = selection.lens;
+      setDefaultBackLens(selection.lens);
     }
   }, []);
 
@@ -1216,16 +1380,23 @@ function DaydropCameraModal({
                   zoom={0}
                   onAvailableLensesChanged={({ lenses }) => {
                     if (facing === 'back') {
-                      updateDefaultBackLens(lenses);
+                      updateDefaultBackLens(lenses, 'available-lenses-changed');
+                    } else if (__DEV__) {
+                      console.log('[DaydropCamera] available lenses', {
+                        facing,
+                        lenses,
+                        selectedLens,
+                        zoom: 0,
+                      });
                     }
                   }}
                   onCameraReady={() => {
                     if (__DEV__) {
-                      console.log('[DaydropCamera] ready', { facing });
+                      console.log('[DaydropCamera] ready', { facing, selectedLens, zoom: 0 });
                     }
                     setCameraReady(true);
                     if (facing === 'back') {
-                      void cameraRef.current?.getAvailableLensesAsync().then(updateDefaultBackLens).catch(() => undefined);
+                      void cameraRef.current?.getAvailableLensesAsync().then((lenses) => updateDefaultBackLens(lenses, 'camera-ready')).catch(() => undefined);
                     }
                     if (__DEV__) {
                       void logAvailablePictureSizes(cameraRef.current, facing);
@@ -3989,11 +4160,18 @@ function CoupleConnectScreen({
   const connectTitle = getConnectTitle(displayPartnerType, language);
   const connectBody = getConnectBody(displayPartnerType, language);
   const displayName = profile.display_name?.trim() || t.me;
+  const isRegeneratingInvite = pendingAction === 'regenerate';
 
   React.useEffect(() => {
-    setCreatedCode(inviteCode);
-    setCreatedPartnerType(invitePartnerType ?? currentPartnerType);
-    setPartnerType(null);
+    if (inviteCode) {
+      setCreatedCode(inviteCode);
+      setCreatedPartnerType(invitePartnerType ?? currentPartnerType);
+      setPartnerType(null);
+      return;
+    }
+
+    setCreatedCode((currentCode) => currentCode ?? null);
+    setCreatedPartnerType((currentPartnerTypeValue) => currentPartnerTypeValue ?? invitePartnerType ?? currentPartnerType);
   }, [currentPartnerType, inviteCode, invitePartnerType]);
 
   const createInvite = async () => {
@@ -4138,7 +4316,7 @@ function CoupleConnectScreen({
           {canShowCreatedCode ? (
             <View style={styles.inviteReadyWrap}>
               <PartnerTypeSelector
-                disabled={pendingAction === 'regenerate'}
+                disabled={isRegeneratingInvite}
                 partnerType={partnerType ?? createdPartnerType}
                 setPartnerType={setPartnerType}
                 t={t}
@@ -4157,9 +4335,9 @@ function CoupleConnectScreen({
                 </Text>
               </Pressable>
               <View style={styles.inviteActionRow}>
-                <Pressable onPress={shareInvite} style={styles.inviteActionButton}>
-                  <Feather name="share-2" size={18} color="#111111" style={styles.inviteActionIcon} />
-                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.inviteActionText}>
+                <Pressable onPress={shareInvite} style={[styles.inviteActionButton, styles.inviteShareButton]}>
+                  <Feather name="share-2" size={17} color="#FFFFFF" style={styles.inviteActionIcon} />
+                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={[styles.inviteActionText, styles.inviteActionTextPrimary]}>
                     {language === 'ko' ? '초대 공유하기' : 'Share invite'}
                   </Text>
                 </Pressable>
@@ -4168,20 +4346,19 @@ function CoupleConnectScreen({
                     await Clipboard.setStringAsync(createdCode!);
                     Alert.alert(t.copyDone, t.inviteCode);
                   }}
-                  style={styles.inviteActionButton}>
-                  <Feather name="copy" size={18} color="#111111" style={styles.inviteActionIcon} />
+                  style={[styles.inviteActionButton, styles.inviteCopyButton]}>
+                  <Feather name="copy" size={16} color="#111111" style={styles.inviteActionIcon} />
                   <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.inviteActionText}>
                     {language === 'ko' ? '복사하기' : 'Copy'}
                   </Text>
                 </Pressable>
-                <Pressable disabled={pendingAction === 'regenerate'} onPress={regenerateInvite} style={[styles.inviteActionButton, styles.inviteActionButtonPrimary]}>
-                  {pendingAction === 'regenerate' ? <ActivityIndicator color="#FFFFFF" /> : null}
-                  <Feather name="refresh-cw" size={18} color="#FFFFFF" style={[styles.inviteActionIcon, pendingAction === 'regenerate' && styles.hidden]} />
-                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={[styles.inviteActionText, styles.inviteActionTextPrimary, pendingAction === 'regenerate' && styles.hidden]}>
-                    {language === 'ko' ? '새 코드' : 'New code'}
-                  </Text>
-                </Pressable>
               </View>
+              <Pressable disabled={isRegeneratingInvite} onPress={regenerateInvite} style={[styles.inviteRegenerateButton, isRegeneratingInvite && styles.inviteRegenerateButtonLoading]}>
+                {isRegeneratingInvite ? <ActivityIndicator color="#111111" size="small" /> : <Feather name="refresh-cw" size={15} color="#111111" style={styles.inviteActionIcon} />}
+                <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.inviteRegenerateText}>
+                  {language === 'ko' ? '새 코드 만들기' : 'New code'}
+                </Text>
+              </Pressable>
             </View>
           ) : (
             <>
@@ -4289,9 +4466,13 @@ function getInviteCodeFromURL(url: string | null) {
     return '';
   }
 
-  const parsed = ExpoLinking.parse(url);
-  const code = parsed.queryParams?.code;
-  return normalizeInviteCode(Array.isArray(code) ? code[0] : code);
+  try {
+    const parsed = ExpoLinking.parse(url);
+    return getInviteCodeFromQueryParams(parsed.queryParams);
+  } catch (error) {
+    console.warn('invite link parse failed', error);
+    return '';
+  }
 }
 
 function getConnectBody(partnerType: PartnerType | null, language: Language) {
@@ -6207,35 +6388,61 @@ const styles = StyleSheet.create({
   },
   inviteActionRow: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 8,
   },
   inviteActionButton: {
     alignItems: 'center',
-    backgroundColor: '#FFFEFA',
-    borderColor: '#DED9CF',
+    borderColor: '#E4E0D8',
     borderRadius: 10,
     borderWidth: 1,
     flex: 1,
     flexDirection: 'row',
-    gap: 8,
-    height: 58,
+    gap: 7,
+    height: 46,
     justifyContent: 'center',
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
   },
-  inviteActionButtonPrimary: {
+  inviteShareButton: {
     backgroundColor: '#111111',
     borderColor: '#111111',
+    flex: 1.45,
+  },
+  inviteCopyButton: {
+    backgroundColor: '#FFFFFF',
+    flex: 0.8,
   },
   inviteActionIcon: {
     marginTop: 1,
   },
   inviteActionText: {
     color: '#111111',
-    fontSize: 15,
-    fontWeight: '800',
+    fontSize: 14,
+    fontWeight: '700',
   },
   inviteActionTextPrimary: {
     color: '#FFFFFF',
+  },
+  inviteRegenerateButton: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#E2DED6',
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 6,
+    height: 38,
+    justifyContent: 'center',
+    minWidth: 128,
+    paddingHorizontal: 14,
+  },
+  inviteRegenerateButtonLoading: {
+    opacity: 0.72,
+  },
+  inviteRegenerateText: {
+    color: '#111111',
+    fontSize: 13,
+    fontWeight: '700',
   },
   joinSection: {
     marginTop: 4,

@@ -3,27 +3,26 @@ import { router, useLocalSearchParams } from 'expo-router';
 import React from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
-import { normalizeInviteCode, PENDING_INVITE_CODE_STORAGE_KEY } from '@/lib/inviteLink';
+import { getInviteCodeFromQueryParams, PENDING_INVITE_CODE_STORAGE_KEY } from '@/lib/inviteLink';
 
 export default function InviteRoute() {
-  const params = useLocalSearchParams<{ code?: string | string[] }>();
-  const rawCode = Array.isArray(params.code) ? params.code[0] : params.code;
+  const params = useLocalSearchParams<{ code?: string | string[]; inviteCode?: string | string[]; invite_code?: string | string[] }>();
+  const inviteCode = getInviteCodeFromQueryParams(params);
 
   React.useEffect(() => {
     let cancelled = false;
 
     const saveAndGoHome = async () => {
-      const code = normalizeInviteCode(rawCode);
-      if (code) {
+      if (inviteCode) {
         try {
-          await AsyncStorage.setItem(PENDING_INVITE_CODE_STORAGE_KEY, code);
+          await AsyncStorage.setItem(PENDING_INVITE_CODE_STORAGE_KEY, inviteCode);
         } catch (error) {
           console.warn('pending invite code save failed', error);
         }
       }
 
       if (!cancelled) {
-        router.replace('/');
+        router.replace('/(tabs)');
       }
     };
 
@@ -32,7 +31,7 @@ export default function InviteRoute() {
     return () => {
       cancelled = true;
     };
-  }, [rawCode]);
+  }, [inviteCode]);
 
   return (
     <View style={styles.container}>

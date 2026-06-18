@@ -32,6 +32,7 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
   const hasLoaded = !enabled || loadedOnce;
   const dropScopeKeyRef = React.useRef(dropScopeKey);
   const refetchInFlightRef = React.useRef<Promise<RefetchResult> | null>(null);
+  const refetchRequestIdRef = React.useRef(0);
   const realtimeRefetchTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastExplicitRefreshAtRef = React.useRef(0);
 
@@ -54,6 +55,8 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
         return null;
       }
 
+      const requestId = refetchRequestIdRef.current + 1;
+      refetchRequestIdRef.current = requestId;
       const nextRefetch = (async () => {
         const requestScopeKey = dropScopeKey;
         const refetchTimerLabel = '[photo] home refetch/signed URL regeneration';
@@ -100,6 +103,8 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
           }
           if (dropScopeKeyRef.current === requestScopeKey) {
             setLoadedOnce(true);
+          }
+          if (refetchRequestIdRef.current === requestId) {
             setLoading(false);
             setRefreshing(false);
             refetchInFlightRef.current = null;
@@ -164,7 +169,10 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
 
   React.useEffect(() => {
     dropScopeKeyRef.current = dropScopeKey;
+    refetchRequestIdRef.current += 1;
     refetchInFlightRef.current = null;
+    setLoading(false);
+    setRefreshing(false);
     setToday(null);
     setRecentDrops([]);
     setLoadedOnce(false);
