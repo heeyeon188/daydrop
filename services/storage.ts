@@ -14,6 +14,7 @@ const THUMBNAIL_JPEG_QUALITY = 0.84;
 const SIGNED_URL_TTL_SECONDS = 60 * 60;
 const SIGNED_URL_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const signedUrlCache = new Map<string, { expiresAt: number; url: string }>();
+const signedUrlInFlightCache = new Map<string, Promise<string>>();
 export type CameraFacing = 'front' | 'back';
 type PickedImageSource = 'library' | CameraFacing;
 export type DaydropPhotoAsset = {
@@ -509,28 +510,39 @@ export async function createPhotoSignedUrl(storagePath: string) {
     return cached.url;
   }
 
+  const inFlight = signedUrlInFlightCache.get(storagePath);
+  if (inFlight) {
+    return inFlight;
+  }
+
   const signedUrlTimerLabel = `[photo] signed URL generation ${storagePath}`;
   if (__DEV__) {
     console.time(signedUrlTimerLabel);
   }
-  const { data, error } = await supabase.storage
+  const signedUrl = supabase.storage
     .from(DROP_PHOTOS_BUCKET)
     .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS)
+    .then(({ data, error }) => {
+      if (error) {
+        throw error;
+      }
+
+      signedUrlCache.set(storagePath, {
+        expiresAt: Date.now() + SIGNED_URL_TTL_SECONDS * 1000,
+        url: data.signedUrl,
+      });
+
+      return data.signedUrl;
+    })
     .finally(() => {
       if (__DEV__) {
         console.timeEnd(signedUrlTimerLabel);
       }
+      signedUrlInFlightCache.delete(storagePath);
     });
-  if (error) {
-    throw error;
-  }
 
-  signedUrlCache.set(storagePath, {
-    expiresAt: Date.now() + SIGNED_URL_TTL_SECONDS * 1000,
-    url: data.signedUrl,
-  });
-
-  return data.signedUrl;
+  signedUrlInFlightCache.set(storagePath, signedUrl);
+  return signedUrl;
 }
 
 export async function deletePhotoStorageFile(path: string) {

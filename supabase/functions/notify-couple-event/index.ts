@@ -3,6 +3,28 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.106.1';
 
 const INTERNAL_SECRET_HEADER = 'x-internal-push-secret';
 const SEND_PUSH_FUNCTION_NAME = 'send-push-notification';
+const COUPLE_EVENT_PUSH_COPY = {
+  partner_connected: {
+    en: {
+      title: "You're connected on Daydrop",
+      body: "Start sharing today's mission together.",
+    },
+    ko: {
+      title: 'Daydrop에서 연결되었어요',
+      body: '오늘의 질문을 함께 시작해보세요.',
+    },
+  },
+  partner_photo_uploaded: {
+    en: {
+      title: "Partner uploaded today's photo",
+      body: "Open Daydrop to unlock today's moment.",
+    },
+    ko: {
+      title: '상대가 오늘의 사진을 올렸어요',
+      body: 'Daydrop을 열고 오늘의 순간을 확인해보세요.',
+    },
+  },
+};
 
 type CoupleEventPayload =
   | {
@@ -195,8 +217,8 @@ async function handlePartnerPhotoUploaded({
     return json({ ok: true, skipped: true, reason: 'no_recipients' }, 200);
   }
 
-  const sendResult = await sendPush({
-    body: "Open Daydrop to unlock today's moment.",
+  const sendResult = await sendLocalizedPush({
+    adminClient,
     data: {
       type: 'partner_photo_uploaded',
       coupleId: payload.coupleId,
@@ -204,9 +226,9 @@ async function handlePartnerPhotoUploaded({
       uploaderUserId: submission.user_id,
     },
     internalPushSecret,
+    messageByLanguage: COUPLE_EVENT_PUSH_COPY.partner_photo_uploaded,
     recipientUserIds,
     supabaseUrl,
-    title: "Partner uploaded today's photo",
   });
 
   if (!sendResult.ok) {
@@ -293,16 +315,16 @@ async function handlePartnerConnected({
     return json({ ok: true, skipped: true, reason: 'no_recipients' }, 200);
   }
 
-  const sendResult = await sendPush({
-    body: "Start sharing today's mission together.",
+  const sendResult = await sendLocalizedPush({
+    adminClient,
     data: {
       type: 'partner_connected',
       coupleId: payload.coupleId,
     },
     internalPushSecret,
+    messageByLanguage: COUPLE_EVENT_PUSH_COPY.partner_connected,
     recipientUserIds,
     supabaseUrl,
-    title: "You're connected on Daydrop",
   });
 
   if (!sendResult.ok) {
@@ -438,6 +460,90 @@ async function sendPush({
     console.error('[Push] send-push-notification request error', error);
     return { ok: false as const, error: 'request_failed' };
   }
+}
+
+async function sendLocalizedPush({
+  adminClient,
+  data,
+  internalPushSecret,
+  messageByLanguage,
+  recipientUserIds,
+  supabaseUrl,
+}: {
+  adminClient: ReturnType<typeof createClient>;
+  data: Record<string, unknown>;
+  internalPushSecret: string;
+  messageByLanguage: {
+    en: {
+      body: string;
+      title: string;
+    };
+    ko: {
+      body: string;
+      title: string;
+    };
+  };
+  recipientUserIds: string[];
+  supabaseUrl: string;
+}) {
+  const koreanUserIdSet = await getKoreanPreferredLanguageUserIdSet(adminClient, recipientUserIds);
+  const localizedRecipientGroups = groupRecipientUserIdsByLanguage(recipientUserIds, koreanUserIdSet);
+
+  for (const group of localizedRecipientGroups) {
+    const message = messageByLanguage[group.language];
+    const sendResult = await sendPush({
+      body: message.body,
+      data,
+      internalPushSecret,
+      recipientUserIds: group.recipientUserIds,
+      supabaseUrl,
+      title: message.title,
+    });
+
+    if (!sendResult.ok) {
+      return sendResult;
+    }
+  }
+
+  return { ok: true as const };
+}
+
+async function getKoreanPreferredLanguageUserIdSet(adminClient: ReturnType<typeof createClient>, userIds: string[]) {
+  const uniqueUserIds = Array.from(new Set(userIds));
+  if (!uniqueUserIds.length) {
+    return new Set<string>();
+  }
+
+  const { data, error } = await adminClient
+    .from('profiles')
+    .select('id,preferred_language')
+    .in('id', uniqueUserIds);
+
+  if (error) {
+    console.warn('[Push] preferred_language lookup failed. Falling back to English push copy.', error);
+    return new Set<string>();
+  }
+
+  return new Set(
+    (data ?? [])
+      .filter((profile) => profile?.preferred_language === 'ko' && typeof profile.id === 'string')
+      .map((profile) => profile.id)
+  );
+}
+
+function groupRecipientUserIdsByLanguage(recipientUserIds: string[], koreanUserIdSet: Set<string>) {
+  const groups = [
+    {
+      language: 'en' as const,
+      recipientUserIds: recipientUserIds.filter((userId) => !koreanUserIdSet.has(userId)),
+    },
+    {
+      language: 'ko' as const,
+      recipientUserIds: recipientUserIds.filter((userId) => koreanUserIdSet.has(userId)),
+    },
+  ];
+
+  return groups.filter((group) => group.recipientUserIds.length > 0);
 }
 
 function isValidCoupleEventPayload(payload: CoupleEventPayload | null | undefined): payload is CoupleEventPayload {

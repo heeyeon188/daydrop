@@ -9,7 +9,7 @@ import {
   uploadDropThumbnailImage,
   type DropImageFileInfo,
 } from '@/services/storage';
-import type { DropSubmission, RecentDrop, TodayDropPayload } from '@/types/daydrop';
+import type { DropSubmission, PartnerType, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
 const RECENT_DROPS_LIMIT = 10;
 const RECENT_DROPS_QUERY_LIMIT = 30;
@@ -363,32 +363,73 @@ export async function deletePhotoSubmission(submissionId: string) {
 }
 
 export async function getRecentDrops(coupleId: string): Promise<RecentDrop[]> {
-  const { data, error } = await supabase
+  const { data: couple, error: coupleError } = await supabase
+    .from('couples')
+    .select('connected_at, partner_type, status')
+    .eq('id', coupleId)
+    .maybeSingle();
+
+  if (coupleError) {
+    throw coupleError;
+  }
+
+  const partnerType = getPartnerType(couple?.partner_type);
+  const allowedAudiences = partnerType ? ['common', partnerType] : ['common'];
+  const query = supabase
     .from('daily_drops')
     .select(
       `
       *,
-      mission:missions(prompt_ko, prompt_en),
+      mission:missions!inner(prompt_ko, prompt_en, audience),
       drop_submissions(*)
     `
     )
     .eq('couple_id', coupleId)
+    .in('mission.audience', allowedAudiences)
     .order('drop_date', { ascending: false })
     .limit(RECENT_DROPS_QUERY_LIMIT);
+
+  const { data, error } = await query;
 
   if (error) {
     throw error;
   }
 
   const dropsWithPhotos = ((data ?? []) as RecentDrop[])
+    .filter((drop) => isAllowedRecentDrop(drop, allowedAudiences))
     .map((drop) => ({
       ...drop,
-      drop_submissions: drop.drop_submissions.filter(hasSubmissionPhoto),
+      drop_submissions: drop.drop_submissions.filter((submission) => isVisibleRecentSubmission(submission, couple?.status, couple?.connected_at)),
     }))
     .filter((drop) => drop.drop_submissions.length > 0)
     .slice(0, RECENT_DROPS_LIMIT);
 
   return Promise.all(dropsWithPhotos.map(signRecentPhotoUrls));
+}
+
+function getPartnerType(value: unknown): PartnerType | null {
+  return value === 'couple' || value === 'friend' ? value : null;
+}
+
+function isAllowedRecentDrop(drop: RecentDrop, allowedAudiences: string[]) {
+  const audience = drop.mission?.audience ?? 'common';
+  return allowedAudiences.includes(audience);
+}
+
+function isVisibleRecentSubmission(
+  submission: Pick<DropSubmission, 'image_url' | 'storage_path' | 'submitted_at'>,
+  coupleStatus?: string | null,
+  connectedAt?: string | null
+) {
+  if (!hasSubmissionPhoto(submission)) {
+    return false;
+  }
+
+  if (coupleStatus !== 'active' || !connectedAt) {
+    return true;
+  }
+
+  return new Date(submission.submitted_at).getTime() >= new Date(connectedAt).getTime();
 }
 
 async function signTodayPhotoUrls(payload: TodayDropPayload) {

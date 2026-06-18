@@ -4,6 +4,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.106.1';
 const EXPO_PUSH_API_URL = 'https://exp.host/--/api/v2/push/send';
 const INTERNAL_SECRET_HEADER = 'x-internal-push-secret';
 const MAX_MESSAGES_PER_REQUEST = 100;
+const MAX_EXPO_PUSH_ATTEMPTS = 3;
 
 /*
   Test (replace placeholders, do not commit real secrets):
@@ -34,6 +35,13 @@ type ExpoPushTicket = {
     error?: string;
     [key: string]: unknown;
   };
+};
+
+type ExpoPushResult = {
+  body: Record<string, unknown> | null;
+  ok: boolean;
+  requestFailed?: boolean;
+  status: number;
 };
 
 const corsHeaders = {
@@ -141,22 +149,28 @@ Deno.serve(async (req) => {
     const chunkMessages = pushMessages.slice(index, index + MAX_MESSAGES_PER_REQUEST);
     const chunkRows = rows.slice(index, index + MAX_MESSAGES_PER_REQUEST);
 
-    const expoResponse = await fetch(EXPO_PUSH_API_URL, {
-      method: 'POST',
-      headers: expoHeaders,
-      body: JSON.stringify(chunkMessages),
+    const expoResult = await sendExpoPushChunkWithRetry({
+      expoHeaders,
+      messages: chunkMessages,
     });
 
-    const expoResult = await safeJson(expoResponse);
-    if (!expoResponse.ok) {
+    if (!expoResult.ok) {
       console.error('[Push] Expo push API request failed', {
-        status: expoResponse.status,
-        body: expoResult,
+        status: expoResult.status,
+        body: expoResult.body,
+        requestFailed: expoResult.requestFailed === true,
       });
-      return json({ error: 'expo_push_send_failed', status: expoResponse.status, details: expoResult }, 502);
+      return json(
+        {
+          error: expoResult.requestFailed ? 'expo_push_request_failed' : 'expo_push_send_failed',
+          status: expoResult.status,
+          details: expoResult.body,
+        },
+        502
+      );
     }
 
-    const tickets = normalizeTickets(expoResult?.data);
+    const tickets = normalizeTickets(expoResult.body?.data);
     allTickets.push(...tickets);
     console.log('[Push] Expo push tickets', JSON.stringify(tickets));
 
@@ -227,6 +241,80 @@ function normalizeTickets(data: unknown): ExpoPushTicket[] {
     return [data as ExpoPushTicket];
   }
   return [];
+}
+
+async function sendExpoPushChunkWithRetry({
+  expoHeaders,
+  messages,
+}: {
+  expoHeaders: Record<string, string>;
+  messages: Record<string, unknown>[];
+}): Promise<ExpoPushResult> {
+  let lastResult: ExpoPushResult = {
+    body: null,
+    ok: false,
+    requestFailed: true,
+    status: 0,
+  };
+
+  for (let attempt = 1; attempt <= MAX_EXPO_PUSH_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(EXPO_PUSH_API_URL, {
+        method: 'POST',
+        headers: expoHeaders,
+        body: JSON.stringify(messages),
+      });
+
+      const body = await safeJson(response);
+      lastResult = {
+        body,
+        ok: response.ok,
+        status: response.status,
+      };
+
+      if (response.ok || !isRetryableStatus(response.status) || attempt === MAX_EXPO_PUSH_ATTEMPTS) {
+        return lastResult;
+      }
+
+      console.warn('[Push] Expo push API retryable failure', {
+        attempt,
+        status: response.status,
+        body,
+      });
+    } catch (error) {
+      lastResult = {
+        body: { message: error instanceof Error ? error.message : 'request_failed' },
+        ok: false,
+        requestFailed: true,
+        status: 0,
+      };
+
+      if (attempt === MAX_EXPO_PUSH_ATTEMPTS) {
+        return lastResult;
+      }
+
+      console.warn('[Push] Expo push API request retry', {
+        attempt,
+        error,
+      });
+    }
+
+    await delay(getRetryDelayMs(attempt));
+  }
+
+  return lastResult;
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function getRetryDelayMs(attempt: number): number {
+  return 400 * attempt;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function safeJson(response: Response) {

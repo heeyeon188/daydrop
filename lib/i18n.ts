@@ -58,6 +58,8 @@ type TranslationKey =
   | 'inviteBody'
   | 'inviteCode'
   | 'inviteCodeError'
+  | 'expiredInviteCode'
+  | 'invalidInviteCode'
   | 'joinByCode'
   | 'joinError'
   | 'korean'
@@ -182,10 +184,12 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     email: '이메일',
     english: 'English',
     enterInvite: '초대 코드를 입력해주세요.',
-    enterProfile: '당신의 정보를 입력해주세요',
+    enterProfile: '정보를 입력해주세요',
     inviteBody: '한 명이 초대 코드를 만들고, 다른 한 명이 그 코드를 입력하면 오늘의 Mission이 열려요.',
     inviteCode: '초대 코드',
     inviteCodeError: '초대 코드 오류',
+    expiredInviteCode: '만료된 초대 코드예요. 새 코드를 받아주세요.',
+    invalidInviteCode: '초대 코드가 올바르지 않아요.',
     joinByCode: '코드로 참여하기',
     joinError: '참여 오류',
     korean: '한국어',
@@ -233,7 +237,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     reportIssue: '문제 신고',
     reportIssueBody: '불쾌한 사진, 메시지, 파트너 연결 문제를 신고하세요.',
     save: '저장',
-    searchCountry: '나라 검색',
+    searchCountry: '국가 검색',
     sendDone: '보내기 완료',
     sendMine: '내 하루 보내기',
     settings: 'Settings',
@@ -309,13 +313,15 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     email: 'Email',
     english: 'English',
     enterInvite: 'Please enter an invite code.',
-    enterProfile: 'Tell us about you',
+    enterProfile: 'Enter your information',
     inviteBody: 'One of you creates an invite code. The other enters it to open today\'s Mission.',
     inviteCode: 'Invite Code',
     inviteCodeError: 'Invite code error',
+    expiredInviteCode: 'This invite code has expired. Please ask for a new code.',
+    invalidInviteCode: 'This invite code is not valid.',
     joinByCode: 'Join with code',
     joinError: 'Join error',
-    korean: '한국어',
+    korean: 'Korean',
     language: 'Language',
     loadingApp: 'Preparing Daydrop.',
     loadingMission: 'Loading today\'s Mission.',

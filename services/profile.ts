@@ -34,13 +34,15 @@ export async function completeProfile(input: ProfileInput): Promise<Profile> {
     throw new Error('not_authenticated');
   }
 
-  const displayName = input.displayName.trim();
+  const appleUser = isAppleUser(user.app_metadata);
+  const metadataDisplayName = typeof user.user_metadata?.display_name === 'string' ? user.user_metadata.display_name.trim() : '';
+  const displayName = input.displayName.trim() || (appleUser ? metadataDisplayName || 'User' : '');
   const country = input.country.trim();
   const city = input.city.trim();
   const timezone = getDeviceTimezone();
   const preferredLanguage = normalizeLanguage(input.preferredLanguage);
 
-  if (!displayName) {
+  if (!displayName && !appleUser) {
     throw new Error('display_name_required');
   }
 
@@ -102,6 +104,11 @@ export async function completeProfile(input: ProfileInput): Promise<Profile> {
   }
 
   return profile;
+}
+
+function isAppleUser(appMetadata: Record<string, unknown>) {
+  const providers = appMetadata.providers;
+  return appMetadata.provider === 'apple' || (Array.isArray(providers) && providers.includes('apple'));
 }
 
 export async function updatePreferredLanguage(language: Language): Promise<Profile> {

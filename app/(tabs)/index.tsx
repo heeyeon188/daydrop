@@ -44,6 +44,7 @@ import { useProfile } from '@/hooks/useProfile';
 import { useSession } from '@/hooks/useSession';
 import { useTodayDrop } from '@/hooks/useTodayDrop';
 import { getPreferredOrDeviceLanguage, getTranslations, normalizeLanguage, type Language } from '@/lib/i18n';
+import { normalizeInviteCode, PENDING_INVITE_CODE_STORAGE_KEY } from '@/lib/inviteLink';
 import { findCountryOption, getCountryLabel, searchCountryOptions } from '@/lib/locations';
 import { deleteAccount } from '@/services/account';
 import { logAppleSignInError, signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut } from '@/services/auth';
@@ -60,11 +61,10 @@ import {
 } from '@/services/notifications';
 import { completeProfile, updatePreferredLanguage, type ProfileInput } from '@/services/profile';
 import { normalizeCameraPhoto, type CameraFacing, type DaydropPhotoAsset } from '@/services/storage';
-import type { Couple, CoupleMember, DropState, DropSubmission, PartnerType, Profile, RecentDrop, TodayDropPayload } from '@/types/daydrop';
+import type { AuthUser, Couple, CoupleMember, DropState, DropSubmission, PartnerType, Profile, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
 const EMPTY_MEMBERS: CoupleMember[] = [];
 const PERMISSION_INTRO_STORAGE_KEY = 'daydrop.hasSeenPermissionIntro';
-const PENDING_INVITE_CODE_STORAGE_KEY = 'daydrop.pendingInviteCode';
 const DEFAULT_PHOTO_PAIR_HEIGHT = 292;
 const STORY_TEMPLATE_BASE_WIDTH = 360;
 const STORY_TEMPLATE_BASE_HEIGHT = 640;
@@ -74,8 +74,8 @@ const RECENT_THUMB_GROUP_WIDTH = 138;
 const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
 const RECENT_THUMB_DEFAULT_HEIGHT = 82;
 const HOME_RECENT_DROPS_LIMIT = 5;
-const LOCKED_PHOTO_BLUR_RADIUS = 58;
-const LOCKED_THUMBNAIL_PHOTO_BLUR_RADIUS = 84;
+const LOCKED_PHOTO_BLUR_RADIUS = 320;
+const LOCKED_THUMBNAIL_PHOTO_BLUR_RADIUS = 340;
 const HOME_IMAGE_TRANSITION_MS = 180;
 const TODAY_DROP_PENDING_TEXT_COLOR = '#666666';
 const TODAY_DROP_PENDING_ICON_COLOR = '#7890AE';
@@ -120,6 +120,8 @@ type SafeImageResizeMode = React.ComponentProps<typeof RNImage>['resizeMode'];
 
 const imageSizeCache = new Map<string, ImageSize>();
 const imageSizeInFlight = new Map<string, Promise<ImageSize>>();
+const IOS_BACK_WIDE_LENS = 'builtInWideAngleCamera';
+const UNSAFE_DEFAULT_BACK_LENSES = new Set(['builtInUltraWideCamera', 'builtInDualWideCamera', 'builtInDualCamera', 'builtInTripleCamera']);
 
 const ULTRA_WIDE_BACK_LENS_PATTERNS = ['ultra', '0.5', '초광각'];
 const NON_DEFAULT_BACK_LENS_PATTERNS = [
@@ -139,19 +141,23 @@ const NON_DEFAULT_BACK_LENS_PATTERNS = [
 const DEFAULT_BACK_LENS_PATTERNS = ['wide angle', 'wide-angle', 'wide', 'back camera', 'camera', '광각', '후면', '카메라'];
 
 function selectDefaultBackLens(lenses: string[]) {
-  const nonUltraWideBackLenses = lenses.filter((lens) => {
+  if (lenses.includes(IOS_BACK_WIDE_LENS)) {
+    return IOS_BACK_WIDE_LENS;
+  }
+
+  const safeBackLenses = lenses.filter((lens) => {
     const normalized = lens.toLowerCase();
-    return !ULTRA_WIDE_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern));
-  });
-  const preferredBackLenses = nonUltraWideBackLenses.filter((lens) => {
-    const normalized = lens.toLowerCase();
-    return !NON_DEFAULT_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern));
+    return (
+      !UNSAFE_DEFAULT_BACK_LENSES.has(lens) &&
+      !ULTRA_WIDE_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern)) &&
+      !NON_DEFAULT_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern))
+    );
   });
 
-  return preferredBackLenses.find((lens) => {
+  return safeBackLenses.find((lens) => {
     const normalized = lens.toLowerCase();
     return DEFAULT_BACK_LENS_PATTERNS.some((pattern) => normalized.includes(pattern));
-  }) ?? preferredBackLenses[0] ?? nonUltraWideBackLenses[0];
+  }) ?? safeBackLenses[0];
 }
 
 export default function MissionScreen() {
@@ -221,6 +227,7 @@ export default function MissionScreen() {
   if (!profileState.profile?.profile_completed) {
     return (
       <ProfileSetupScreen
+        isAppleUser={isAppleUser(user)}
         language={language}
         onLogout={signOut}
         onSaved={async (profile) => {
@@ -338,37 +345,6 @@ function MissionContent({
   const partnerCount = partnerOptions.length;
   const canAddPartner = partnerCount < 4;
   const visibleRecentDrops = React.useMemo(() => recentDrops.slice(0, HOME_RECENT_DROPS_LIMIT), [recentDrops]);
-  const homePhotoUrls = React.useMemo(() => {
-    const urls = new Set<string>();
-
-    today?.submissions.forEach((submission) => {
-      const image = getSubmissionDisplayImage(submission);
-      if (image) {
-        urls.add(image);
-      }
-    });
-
-    visibleRecentDrops.forEach((drop) => {
-      drop.drop_submissions.forEach((submission) => {
-        const image = getSubmissionThumbnailImage(submission);
-        if (image) {
-          urls.add(image);
-        }
-      });
-    });
-
-    return Array.from(urls);
-  }, [today?.submissions, visibleRecentDrops]);
-
-  React.useEffect(() => {
-    if (homePhotoUrls.length === 0) {
-      return;
-    }
-
-    ExpoImage.prefetch(homePhotoUrls, 'memory-disk').catch((nextError) => {
-      console.warn('[photo] home image prefetch failed', nextError);
-    });
-  }, [homePhotoUrls]);
 
   React.useEffect(() => {
     let mounted = true;
@@ -437,10 +413,17 @@ function MissionContent({
         setPartnerDisconnectedNoticeVisible(false);
         await onCoupleChanged();
         await refetch(true);
+        router.replace('/');
         Alert.alert(t.partnerAddedSuccess);
       } catch (nextError) {
         console.error('join invite failed', nextError);
-        processedInviteLinkRef.current = null;
+        const inviteErrorType = getJoinInviteErrorType(nextError);
+        if (inviteErrorType === 'invalid' || inviteErrorType === 'unknown') {
+          processedInviteLinkRef.current = null;
+        }
+        if (inviteErrorType !== 'invalid') {
+          router.replace('/');
+        }
         Alert.alert(t.joinError, getJoinInviteErrorMessage(nextError, t));
       }
     };
@@ -824,6 +807,7 @@ function MissionContent({
             Alert.alert(t.partnerAddedSuccess);
           }}
           onClose={() => setConnectVisible(false)}
+          onInviteCreated={onCoupleChanged}
           onInviteCodeHandled={clearPendingInviteCode}
           onLogout={onLogout}
           pending={Boolean(inviteCode)}
@@ -841,7 +825,6 @@ function Header({ onMenuPress }: { onMenuPress: () => void }) {
         DAYDROP
       </Text>
       <View style={styles.headerActions}>
-        <Feather name="search" size={29} color="#050505" strokeWidth={2.35} />
         <Pressable hitSlop={12} onPress={onMenuPress}>
           <Feather name="more-vertical" size={30} color="#050505" strokeWidth={2.35} />
         </Pressable>
@@ -871,7 +854,7 @@ function DaydropCameraModal({
   const [captured, setCaptured] = React.useState<(DaydropPhotoAsset & { didFlip?: boolean; mirrorMode?: string; source: CameraFacing }) | null>(null);
   const [cameraReady, setCameraReady] = React.useState(false);
   const [capturing, setCapturing] = React.useState(false);
-  const [defaultBackLens, setDefaultBackLens] = React.useState<string | undefined>(undefined);
+  const [defaultBackLens, setDefaultBackLens] = React.useState(IOS_BACK_WIDE_LENS);
   const [previewLayout, setPreviewLayout] = React.useState<ImageSize | null>(null);
   const insets = useSafeAreaInsets();
   const cameraRef = React.useRef<CameraView>(null);
@@ -1064,8 +1047,21 @@ function DaydropCameraModal({
   };
 
   const topMission = mission || (language === 'ko' ? '오늘의 Mission' : "Today's Mission");
-  const permissionText = language === 'ko' ? '사진을 보내려면 카메라 권한이 필요해요.' : 'Camera permission is needed to send a photo.';
-  const permissionButtonText = language === 'ko' ? '카메라 권한 허용하기' : 'Allow camera permission';
+  const cameraPermissionDenied = permission?.canAskAgain === false;
+  const permissionText = cameraPermissionDenied
+    ? language === 'ko'
+      ? '카메라 접근이 꺼져 있어요. 설정에서 카메라 접근을 켜면 사진을 촬영할 수 있어요.'
+      : 'Camera access is turned off. You can enable camera access in Settings.'
+    : language === 'ko'
+      ? '사진을 촬영하고 보내려면 카메라 접근이 필요해요.'
+      : 'Camera access is needed to take and send a photo.';
+  const permissionButtonText = cameraPermissionDenied
+    ? language === 'ko'
+      ? '설정 열기'
+      : 'Open Settings'
+    : language === 'ko'
+      ? '계속'
+      : 'Continue';
   const capturedAspectRatio = captured?.width && captured.height ? captured.width / captured.height : null;
   const previewAspectRatio = previewLayout?.width && previewLayout.height ? previewLayout.width / previewLayout.height : null;
 
@@ -1118,13 +1114,6 @@ function DaydropCameraModal({
                 {permissionButtonText}
               </Text>
             </Pressable>
-            {permission.canAskAgain === false ? (
-              <Pressable hitSlop={8} onPress={() => Linking.openSettings()}>
-                <Text allowFontScaling={false} style={styles.cameraSettingsText}>
-                  {language === 'ko' ? '설정 열기' : 'Open Settings'}
-                </Text>
-              </Pressable>
-            ) : null}
           </View>
         ) : (
           <>
@@ -1157,6 +1146,7 @@ function DaydropCameraModal({
                   mode="picture"
                   responsiveOrientationWhenOrientationLocked
                   selectedLens={selectedLens}
+                  zoom={0}
                   onAvailableLensesChanged={({ lenses }) => {
                     if (facing === 'back') {
                       updateDefaultBackLens(lenses);
@@ -2380,7 +2370,7 @@ function PermissionIntroModal({ language, onClose, visible }: { language: Langua
           </Text>
           <Pressable onPress={onClose} style={styles.primaryButton}>
             <Text allowFontScaling={false} style={styles.primaryButtonText}>
-              {language === 'ko' ? '확인' : 'OK'}
+              {language === 'ko' ? '계속' : 'Continue'}
             </Text>
           </Pressable>
         </View>
@@ -3694,17 +3684,20 @@ function AuthScreen({ language }: { language: Language }) {
 }
 
 function ProfileSetupScreen({
+  isAppleUser,
   language,
   onLogout,
   onSaved,
   profile,
 }: {
+  isAppleUser: boolean;
   language: Language;
   onLogout: () => Promise<void>;
   onSaved: (profile: Profile) => Promise<void>;
   profile: Profile | null;
 }) {
-  const t = getTranslations(language);
+  const [selectedLanguage, setSelectedLanguage] = React.useState(language);
+  const t = getTranslations(selectedLanguage);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -3721,7 +3714,13 @@ function ProfileSetupScreen({
           {t.enterProfile}
         </Text>
         <View style={styles.missionCard}>
-          <ProfileForm initialLanguage={language} profile={profile} onSaved={onSaved} />
+          <ProfileForm
+            hideDisplayName={isAppleUser}
+            initialLanguage={language}
+            onLanguageChange={setSelectedLanguage}
+            profile={profile}
+            onSaved={onSaved}
+          />
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -3729,13 +3728,17 @@ function ProfileSetupScreen({
 }
 
 function ProfileForm({
+  hideDisplayName = false,
   initialLanguage,
   onCancel,
+  onLanguageChange,
   onSaved,
   profile,
 }: {
+  hideDisplayName?: boolean;
   initialLanguage: Language;
   onCancel?: () => void;
+  onLanguageChange?: (language: Language) => void;
   onSaved: (profile: Profile) => Promise<void>;
   profile: Profile | null;
 }) {
@@ -3759,9 +3762,9 @@ function ProfileForm({
   }, [countryCode, preferredLanguage]);
 
   const save = async () => {
-    if (!displayName.trim() || !countryCode || !city.trim()) {
+    if ((!hideDisplayName && !displayName.trim()) || !countryCode || !city.trim()) {
       const missing = [
-        !displayName.trim() ? formT.name : null,
+        !hideDisplayName && !displayName.trim() ? formT.name : null,
         !countryCode ? formT.selectCountry : null,
         !city.trim() ? formT.city : null,
       ]
@@ -3792,7 +3795,7 @@ function ProfileForm({
 
   return (
     <View>
-      <TextInput onChangeText={setDisplayName} placeholder={formT.name} style={styles.input} value={displayName} />
+      {!hideDisplayName ? <TextInput onChangeText={setDisplayName} placeholder={formT.name} style={styles.input} value={displayName} /> : null}
       <View style={styles.countryPickerWrap}>
         <TextInput
           autoCorrect={false}
@@ -3855,8 +3858,24 @@ function ProfileForm({
           {formT.language}
         </Text>
         <View style={styles.segment}>
-          <LanguageButton active={preferredLanguage === 'ko'} disabled={saving} label={formT.korean} onPress={() => setPreferredLanguage('ko')} />
-          <LanguageButton active={preferredLanguage === 'en'} disabled={saving} label={formT.english} onPress={() => setPreferredLanguage('en')} />
+          <LanguageButton
+            active={preferredLanguage === 'ko'}
+            disabled={saving}
+            label={formT.korean}
+            onPress={() => {
+              setPreferredLanguage('ko');
+              onLanguageChange?.('ko');
+            }}
+          />
+          <LanguageButton
+            active={preferredLanguage === 'en'}
+            disabled={saving}
+            label={formT.english}
+            onPress={() => {
+              setPreferredLanguage('en');
+              onLanguageChange?.('en');
+            }}
+          />
         </View>
       </View>
       <Pressable disabled={saving} onPress={save} style={[styles.primaryButton, saving && styles.disabledButton]}>
@@ -3887,6 +3906,7 @@ function CoupleConnectScreen({
   language,
   onClose,
   onConnected,
+  onInviteCreated,
   onInviteCodeHandled,
   onLogout,
   pending,
@@ -3899,6 +3919,7 @@ function CoupleConnectScreen({
   language: Language;
   onClose?: () => void;
   onConnected: () => Promise<void>;
+  onInviteCreated: () => Promise<void>;
   onInviteCodeHandled: () => void;
   onLogout: () => Promise<void>;
   pending: boolean;
@@ -3935,8 +3956,27 @@ function CoupleConnectScreen({
       const nextCode = await createCoupleInvite(partnerType);
       setCreatedCode(nextCode);
       setCreatedPartnerType(partnerType);
+      await onInviteCreated();
     } catch (error) {
       console.error('create invite failed', error);
+      Alert.alert(t.inviteCodeError, t.unknownError);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const regenerateInvite = async () => {
+    if (!createdPartnerType || loading) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const nextCode = await createCoupleInvite(createdPartnerType);
+      setCreatedCode(nextCode);
+      await onInviteCreated();
+    } catch (error) {
+      console.error('regenerate invite failed', error);
       Alert.alert(t.inviteCodeError, t.unknownError);
     } finally {
       setLoading(false);
@@ -4045,11 +4085,12 @@ function CoupleConnectScreen({
           {canShowCreatedCode ? (
             <View style={styles.inviteReadyWrap}>
               <Pressable
+                disabled={loading}
                 onPress={async () => {
                   await Clipboard.setStringAsync(createdCode!);
                   Alert.alert(t.copyDone, t.inviteCode);
                 }}
-                style={styles.inviteCodeBox}>
+                style={[styles.inviteCodeBox, loading && styles.disabledButton]}>
                 <Text allowFontScaling={false} style={styles.inviteCode}>
                   {createdCode}
                 </Text>
@@ -4060,7 +4101,7 @@ function CoupleConnectScreen({
               <View style={styles.inviteActionRow}>
                 <Pressable disabled={loading} onPress={shareInvite} style={[styles.inviteActionButton, loading && styles.disabledButton]}>
                   <Feather name="share-2" size={18} color="#111111" style={styles.inviteActionIcon} />
-                  <Text allowFontScaling={false} style={styles.inviteActionText}>
+                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.inviteActionText}>
                     {language === 'ko' ? '초대 공유하기' : 'Share invite'}
                   </Text>
                 </Pressable>
@@ -4072,8 +4113,14 @@ function CoupleConnectScreen({
                   }}
                   style={[styles.inviteActionButton, loading && styles.disabledButton]}>
                   <Feather name="copy" size={18} color="#111111" style={styles.inviteActionIcon} />
-                  <Text allowFontScaling={false} style={styles.inviteActionText}>
+                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.inviteActionText}>
                     {language === 'ko' ? '복사하기' : 'Copy'}
+                  </Text>
+                </Pressable>
+                <Pressable disabled={loading} onPress={regenerateInvite} style={[styles.inviteActionButton, loading && styles.disabledButton]}>
+                  <Feather name="refresh-cw" size={18} color="#111111" style={styles.inviteActionIcon} />
+                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.inviteActionText}>
+                    {language === 'ko' ? '새 코드' : 'New code'}
                   </Text>
                 </Pressable>
               </View>
@@ -4128,11 +4175,31 @@ function getConnectTitle(partnerType: PartnerType | null, language: Language) {
   return language === 'ko' ? '둘만의 Daydrop을 시작해보세요.' : 'Start your private Daydrop.';
 }
 
-function normalizeInviteCode(value: unknown) {
-  return typeof value === 'string' ? value.trim().toUpperCase() : '';
+function getJoinInviteErrorMessage(error: unknown, t: ReturnType<typeof getTranslations>) {
+  const errorType = getJoinInviteErrorType(error);
+
+  if (errorType === 'alreadyConnected') {
+    return t.alreadyConnectedPartner;
+  }
+
+  if (errorType === 'selfInvite') {
+    return t.selfInviteCode;
+  }
+
+  if (errorType === 'invalid') {
+    return t.invalidInviteCode;
+  }
+
+  if (errorType === 'expired') {
+    return t.expiredInviteCode;
+  }
+
+  return t.unknownError;
 }
 
-function getJoinInviteErrorMessage(error: unknown, t: ReturnType<typeof getTranslations>) {
+type JoinInviteErrorType = 'alreadyConnected' | 'expired' | 'invalid' | 'selfInvite' | 'unknown';
+
+function getJoinInviteErrorType(error: unknown): JoinInviteErrorType {
   let message = '';
   if (error instanceof Error || typeof error === 'string') {
     message = error instanceof Error ? error.message : error;
@@ -4140,15 +4207,23 @@ function getJoinInviteErrorMessage(error: unknown, t: ReturnType<typeof getTrans
     message = error.message;
   }
 
-  if (message.includes('already_connected_partner')) {
-    return t.alreadyConnectedPartner;
+  if (message.includes('already_connected_partner') || message.includes('already_in_couple')) {
+    return 'alreadyConnected';
+  }
+
+  if (message.includes('expired_invite_code')) {
+    return 'expired';
+  }
+
+  if (message.includes('invalid_invite_code')) {
+    return 'invalid';
   }
 
   if (message.includes('self_invite_code')) {
-    return t.selfInviteCode;
+    return 'selfInvite';
   }
 
-  return t.unknownError;
+  return 'unknown';
 }
 
 function getInviteCodeFromURL(url: string | null) {
@@ -4175,6 +4250,13 @@ function getConnectBody(partnerType: PartnerType | null, language: Language) {
 
 function isAppleAuthCanceled(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ERR_REQUEST_CANCELED';
+}
+
+function isAppleUser(user: AuthUser) {
+  const provider = user.app_metadata?.provider;
+  const providers = user.app_metadata?.providers;
+
+  return provider === 'apple' || (Array.isArray(providers) && providers.includes('apple'));
 }
 
 function PartnerTypeSelector({
@@ -4245,11 +4327,19 @@ function CenteredState({ text }: { text: string }) {
 }
 
 function AppLoadingScreen() {
+  const language = getPreferredOrDeviceLanguage();
+  const subtitle = language === 'ko' ? '오늘을 공유하는 가장 쉬운 방법' : 'The easiest way to share your day';
+
   return (
     <SafeAreaView style={styles.appLoadingScreen}>
-      <Text allowFontScaling={false} style={styles.appLoadingLogo}>
-        DAYDROP
-      </Text>
+      <View style={styles.appLoadingContent}>
+        <Text allowFontScaling={false} style={styles.appLoadingLogo}>
+          DAYDROP
+        </Text>
+        <Text allowFontScaling={false} style={[styles.appLoadingSubtitle, language === 'ko' ? styles.appLoadingSubtitleKo : styles.appLoadingSubtitleEn]}>
+          {subtitle}
+        </Text>
+      </View>
     </SafeAreaView>
   );
 }
@@ -4362,12 +4452,28 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
   },
+  appLoadingContent: {
+    alignItems: 'center',
+    transform: [{ translateY: 18 }],
+  },
   appLoadingLogo: {
     color: '#FFFFFF',
-    fontSize: 23,
+    fontSize: 34,
     fontWeight: '800',
-    letterSpacing: 9,
-    paddingLeft: 9,
+    letterSpacing: 10,
+    paddingLeft: 10,
+  },
+  appLoadingSubtitle: {
+    color: 'rgba(255, 255, 255, 0.62)',
+    fontWeight: '400',
+    marginTop: 18,
+    textAlign: 'center',
+  },
+  appLoadingSubtitleKo: {
+    fontSize: 15,
+  },
+  appLoadingSubtitleEn: {
+    fontSize: 14,
   },
   safeArea: {
     backgroundColor: '#FFFCF7',
@@ -5157,7 +5263,9 @@ const styles = StyleSheet.create({
   },
   allDropThumbs: {
     borderRadius: 11,
+    columnGap: 0,
     flexDirection: 'row',
+    gap: 0,
     height: 76,
     overflow: 'hidden',
     width: 118,

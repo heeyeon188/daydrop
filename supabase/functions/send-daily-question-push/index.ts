@@ -2,10 +2,21 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.106.1';
 
 const INTERNAL_SECRET_HEADER = 'x-internal-push-secret';
-const MAX_RECIPIENT_IDS_PER_REQUEST = 500;
+const MAX_RECIPIENT_IDS_PER_REQUEST = 50;
+const MAX_SEND_PUSH_ATTEMPTS = 3;
 const SEND_PUSH_FUNCTION_NAME = 'send-push-notification';
 const DEFAULT_TIMEZONE = 'Asia/Seoul';
 const TARGET_LOCAL_HOUR = 12;
+const DAILY_QUESTION_PUSH_COPY = {
+  en: {
+    title: "Today's question is here",
+    body: 'Take a photo and share your day.',
+  },
+  ko: {
+    title: '오늘의 질문이 도착했어요',
+    body: '사진으로 답하고 오늘을 공유해보세요.',
+  },
+};
 
 type PushTokenRow = {
   user_id: string | null;
@@ -23,8 +34,24 @@ type CreatedPushEvent = {
   eventId: string;
   idempotencyKey: string;
   localDate: string;
+  retryingExisting: boolean;
   timezone: string;
   userId: string;
+};
+
+type ExistingDailyPushEventRow = {
+  id: string;
+  idempotency_key: string;
+  payload: Record<string, unknown> | null;
+  recipient_user_ids: string[] | null;
+  status: string;
+};
+
+type SendPushResult = {
+  body: Record<string, unknown> | null;
+  ok: boolean;
+  requestFailed?: boolean;
+  status: number;
 };
 
 const corsHeaders = {
@@ -70,19 +97,8 @@ Deno.serve(async (req) => {
       return json({ error: 'token_lookup_failed' }, 500);
     }
 
-    const candidates = collectNoonCandidates((tokenRows ?? []) as PushTokenRow[], runAt);
-    if (!candidates.length) {
-      return json(
-        {
-          ok: true,
-          skipped: true,
-          reason: 'no_recipients_in_local_noon_window',
-          checkedTokenCount: (tokenRows ?? []).length,
-        },
-        200
-      );
-    }
-
+    const rows = (tokenRows ?? []) as PushTokenRow[];
+    const candidates = collectNoonCandidates(rows, runAt);
     const createdEvents: CreatedPushEvent[] = [];
     for (const candidate of candidates) {
       const createdEvent = await createEventIfNew({
@@ -95,13 +111,34 @@ Deno.serve(async (req) => {
           eventId: createdEvent.eventId,
           idempotencyKey: candidate.idempotencyKey,
           localDate: candidate.localDate,
+          retryingExisting: createdEvent.retryingExisting,
           timezone: candidate.timezone,
           userId: candidate.userId,
         });
       }
     }
 
-    if (!createdEvents.length) {
+    const retryableExistingEvents = await collectRetryableExistingEvents({
+      adminClient,
+      excludeEventIds: new Set(createdEvents.map((event) => event.eventId)),
+      now: runAt,
+      tokenRows: rows,
+    });
+
+    const sendEvents = [...createdEvents, ...retryableExistingEvents];
+    if (!sendEvents.length && !candidates.length) {
+      return json(
+        {
+          ok: true,
+          skipped: true,
+          reason: 'no_recipients_in_local_noon_window_or_retryable_failed_events',
+          checkedTokenCount: (tokenRows ?? []).length,
+        },
+        200
+      );
+    }
+
+    if (!sendEvents.length) {
       return json(
         {
           ok: true,
@@ -113,59 +150,55 @@ Deno.serve(async (req) => {
       );
     }
 
-    const recipientUserIds = createdEvents.map((event) => event.userId);
+    const recipientUserIds = sendEvents.map((event) => event.userId);
     const eventIdByUserId = new Map<string, string>();
-    for (const event of createdEvents) {
+    for (const event of sendEvents) {
       eventIdByUserId.set(event.userId, event.eventId);
     }
 
+    const koreanUserIdSet = await getKoreanPreferredLanguageUserIdSet(adminClient, recipientUserIds);
+    const localizedRecipientGroups = groupRecipientUserIdsByLanguage(recipientUserIds, koreanUserIdSet);
     const sentUserIdSet = new Set<string>();
     const skippedUserIdSet = new Set<string>();
 
-    for (let index = 0; index < recipientUserIds.length; index += MAX_RECIPIENT_IDS_PER_REQUEST) {
-      const chunk = recipientUserIds.slice(index, index + MAX_RECIPIENT_IDS_PER_REQUEST);
-      const sendResponse = await fetch(`${supabaseUrl}/functions/v1/${SEND_PUSH_FUNCTION_NAME}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          [INTERNAL_SECRET_HEADER]: internalPushSecret,
-        },
-        body: JSON.stringify({
-          recipientUserIds: chunk,
-          title: "Today's question is here",
-          body: 'Take a photo and share your day.',
-          data: {
-            type: 'daily_question_ready',
-          },
-        }),
-      });
-
-      const sendResult = await safeJson(sendResponse);
-      if (!sendResponse.ok) {
-        console.error('[Push] send-daily-question-push chunk failed', {
-          status: sendResponse.status,
-          body: sendResult,
+    for (const group of localizedRecipientGroups) {
+      for (let index = 0; index < group.recipientUserIds.length; index += MAX_RECIPIENT_IDS_PER_REQUEST) {
+        const chunk = group.recipientUserIds.slice(index, index + MAX_RECIPIENT_IDS_PER_REQUEST);
+        const sendResult = await sendPushChunkWithRetry({
+          chunk,
+          internalPushSecret,
+          message: DAILY_QUESTION_PUSH_COPY[group.language],
+          supabaseUrl,
         });
-        for (const userId of chunk) {
-          const eventId = eventIdByUserId.get(userId) ?? null;
-          await markEventStatus(adminClient, eventId, {
-            errorMessage: `chunk_http_${sendResponse.status}`,
-            status: 'failed',
+
+        if (!sendResult.ok) {
+          const errorMessage = buildChunkErrorMessage(sendResult);
+          console.error('[Push] send-daily-question-push chunk failed', {
+            status: sendResult.status,
+            body: sendResult.body,
+            requestFailed: sendResult.requestFailed === true,
           });
+          for (const userId of chunk) {
+            const eventId = eventIdByUserId.get(userId) ?? null;
+            await markEventStatus(adminClient, eventId, {
+              errorMessage,
+              status: 'failed',
+            });
+          }
+          return json({ error: 'push_send_failed' }, 502);
         }
-        return json({ error: 'push_send_failed' }, 502);
-      }
 
-      const skippedUserIds = Array.isArray(sendResult?.skippedUserIds)
-        ? sendResult.skippedUserIds.filter((userId: unknown) => typeof userId === 'string')
-        : [];
-      const skippedUserIdSetForChunk = new Set<string>(skippedUserIds);
+        const skippedUserIds = Array.isArray(sendResult.body?.skippedUserIds)
+          ? sendResult.body.skippedUserIds.filter((userId: unknown) => typeof userId === 'string')
+          : [];
+        const skippedUserIdSetForChunk = new Set<string>(skippedUserIds);
 
-      for (const userId of chunk) {
-        if (skippedUserIdSetForChunk.has(userId)) {
-          skippedUserIdSet.add(userId);
-        } else {
-          sentUserIdSet.add(userId);
+        for (const userId of chunk) {
+          if (skippedUserIdSetForChunk.has(userId)) {
+            skippedUserIdSet.add(userId);
+          } else {
+            sentUserIdSet.add(userId);
+          }
         }
       }
     }
@@ -186,7 +219,9 @@ Deno.serve(async (req) => {
         checkedTokenCount: (tokenRows ?? []).length,
         sentRecipientCount: sentUserIdSet.size,
         skippedRecipientCount: skippedUserIdSet.size,
-        createdEventCount: createdEvents.length,
+        createdEventCount: createdEvents.filter((event) => !event.retryingExisting).length,
+        retriedEventCount:
+          createdEvents.filter((event) => event.retryingExisting).length + retryableExistingEvents.length,
       },
       200
     );
@@ -301,12 +336,281 @@ async function createEventIfNew({
 
   if (error) {
     if (error.code === '23505') {
-      return { created: false as const, eventId: null };
+      const { data: existingEvent, error: existingError } = await adminClient
+        .from('push_notification_events')
+        .select('id,status,sent_at')
+        .eq('event_type', 'daily_question_ready')
+        .eq('idempotency_key', candidate.idempotencyKey)
+        .maybeSingle();
+
+      if (existingError) {
+        throw existingError;
+      }
+
+      const canRetry =
+        existingEvent &&
+        (existingEvent.status === 'pending' || existingEvent.status === 'failed') &&
+        existingEvent.sent_at === null;
+
+      if (!canRetry) {
+        return { created: false as const, eventId: null, retryingExisting: false as const };
+      }
+
+      const { error: retryUpdateError } = await adminClient
+        .from('push_notification_events')
+        .update({
+          error_message: null,
+          status: 'pending',
+        })
+        .eq('id', existingEvent.id)
+        .in('status', ['pending', 'failed'])
+        .is('sent_at', null);
+
+      if (retryUpdateError) {
+        throw retryUpdateError;
+      }
+
+      return { created: true as const, eventId: existingEvent.id as string, retryingExisting: true as const };
     }
     throw error;
   }
 
-  return { created: true as const, eventId: data.id as string };
+  return { created: true as const, eventId: data.id as string, retryingExisting: false as const };
+}
+
+async function collectRetryableExistingEvents({
+  adminClient,
+  excludeEventIds,
+  now,
+  tokenRows,
+}: {
+  adminClient: ReturnType<typeof createClient>;
+  excludeEventIds: Set<string>;
+  now: Date;
+  tokenRows: PushTokenRow[];
+}): Promise<CreatedPushEvent[]> {
+  const enabledUserIds = new Set(
+    tokenRows.map((row) => (typeof row.user_id === 'string' ? row.user_id : null)).filter(Boolean)
+  );
+  if (enabledUserIds.size === 0) {
+    return [];
+  }
+
+  const { data, error } = await adminClient
+    .from('push_notification_events')
+    .select('id,idempotency_key,payload,recipient_user_ids,status')
+    .eq('event_type', 'daily_question_ready')
+    .in('status', ['pending', 'failed'])
+    .is('sent_at', null)
+    .order('created_at', { ascending: false })
+    .limit(1000);
+
+  if (error) {
+    throw error;
+  }
+
+  const retryEvents: CreatedPushEvent[] = [];
+  const seenUserLocalDate = new Set<string>();
+
+  for (const event of (data ?? []) as ExistingDailyPushEventRow[]) {
+    if (excludeEventIds.has(event.id)) {
+      continue;
+    }
+
+    const userId = Array.isArray(event.recipient_user_ids) ? event.recipient_user_ids[0] : null;
+    if (typeof userId !== 'string' || !enabledUserIds.has(userId)) {
+      continue;
+    }
+
+    const payload = event.payload && typeof event.payload === 'object' ? event.payload : {};
+    const timezone = typeof payload.timezone === 'string' ? payload.timezone : DEFAULT_TIMEZONE;
+    if (!isValidTimeZone(timezone)) {
+      continue;
+    }
+
+    const localDate = typeof payload.localDate === 'string' ? payload.localDate : null;
+    const todayLocalDate = getLocalDateAndHour(now, timezone).localDate;
+    if (!localDate || localDate !== todayLocalDate) {
+      continue;
+    }
+
+    const dedupeKey = `${userId}:${localDate}`;
+    if (seenUserLocalDate.has(dedupeKey)) {
+      continue;
+    }
+
+    const { error: retryUpdateError } = await adminClient
+      .from('push_notification_events')
+      .update({
+        error_message: null,
+        status: 'pending',
+      })
+      .eq('id', event.id)
+      .in('status', ['pending', 'failed'])
+      .is('sent_at', null);
+
+    if (retryUpdateError) {
+      throw retryUpdateError;
+    }
+
+    seenUserLocalDate.add(dedupeKey);
+    retryEvents.push({
+      eventId: event.id,
+      idempotencyKey: event.idempotency_key,
+      localDate,
+      retryingExisting: true,
+      timezone,
+      userId,
+    });
+  }
+
+  return retryEvents;
+}
+
+async function sendPushChunkWithRetry({
+  chunk,
+  internalPushSecret,
+  message,
+  supabaseUrl,
+}: {
+  chunk: string[];
+  internalPushSecret: string;
+  message: {
+    body: string;
+    title: string;
+  };
+  supabaseUrl: string;
+}): Promise<SendPushResult> {
+  let lastResult: SendPushResult = {
+    body: null,
+    ok: false,
+    requestFailed: true,
+    status: 0,
+  };
+
+  for (let attempt = 1; attempt <= MAX_SEND_PUSH_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(`${supabaseUrl}/functions/v1/${SEND_PUSH_FUNCTION_NAME}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          [INTERNAL_SECRET_HEADER]: internalPushSecret,
+        },
+        body: JSON.stringify({
+          recipientUserIds: chunk,
+          title: message.title,
+          body: message.body,
+          data: {
+            type: 'daily_question_ready',
+          },
+        }),
+      });
+
+      const body = await safeJson(response);
+      lastResult = {
+        body,
+        ok: response.ok,
+        status: response.status,
+      };
+
+      if (response.ok || !isRetryableStatus(response.status) || attempt === MAX_SEND_PUSH_ATTEMPTS) {
+        return lastResult;
+      }
+
+      console.warn('[Push] send-push-notification retryable failure', {
+        attempt,
+        status: response.status,
+        body,
+      });
+    } catch (error) {
+      lastResult = {
+        body: { message: error instanceof Error ? error.message : 'request_failed' },
+        ok: false,
+        requestFailed: true,
+        status: 0,
+      };
+
+      if (attempt === MAX_SEND_PUSH_ATTEMPTS) {
+        return lastResult;
+      }
+
+      console.warn('[Push] send-push-notification request retry', {
+        attempt,
+        error,
+      });
+    }
+
+    await delay(getRetryDelayMs(attempt));
+  }
+
+  return lastResult;
+}
+
+async function getKoreanPreferredLanguageUserIdSet(adminClient: ReturnType<typeof createClient>, userIds: string[]) {
+  const uniqueUserIds = Array.from(new Set(userIds));
+  if (!uniqueUserIds.length) {
+    return new Set<string>();
+  }
+
+  const { data, error } = await adminClient
+    .from('profiles')
+    .select('id,preferred_language')
+    .in('id', uniqueUserIds);
+
+  if (error) {
+    console.warn('[Push] preferred_language lookup failed. Falling back to English push copy.', error);
+    return new Set<string>();
+  }
+
+  return new Set(
+    (data ?? [])
+      .filter((profile) => profile?.preferred_language === 'ko' && typeof profile.id === 'string')
+      .map((profile) => profile.id)
+  );
+}
+
+function groupRecipientUserIdsByLanguage(recipientUserIds: string[], koreanUserIdSet: Set<string>) {
+  const groups = [
+    {
+      language: 'en' as const,
+      recipientUserIds: recipientUserIds.filter((userId) => !koreanUserIdSet.has(userId)),
+    },
+    {
+      language: 'ko' as const,
+      recipientUserIds: recipientUserIds.filter((userId) => koreanUserIdSet.has(userId)),
+    },
+  ];
+
+  return groups.filter((group) => group.recipientUserIds.length > 0);
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function getRetryDelayMs(attempt: number): number {
+  return 400 * attempt;
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildChunkErrorMessage(result: SendPushResult): string {
+  const statusText = result.requestFailed ? 'request_failed' : `chunk_http_${result.status}`;
+  const body = result.body;
+  if (!body || typeof body !== 'object') {
+    return statusText;
+  }
+
+  const error = typeof body.error === 'string' ? body.error : null;
+  const upstreamStatus = typeof body.status === 'number' ? `expo_status_${body.status}` : null;
+  const detailError =
+    body.details && typeof body.details === 'object' && 'error' in body.details && typeof body.details.error === 'string'
+      ? body.details.error
+      : null;
+  const parts = [statusText, error, upstreamStatus, detailError].filter(Boolean);
+  return parts.join(':').slice(0, 500);
 }
 
 async function markEventStatus(

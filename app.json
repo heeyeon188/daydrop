@@ -10,8 +10,13 @@
     "ios": {
       "supportsTablet": false,
       "usesAppleSignIn": true,
-      "buildNumber": "4",
+      "buildNumber": "23",
       "infoPlist": {
+        "CFBundleDevelopmentRegion": "en",
+        "CFBundleLocalizations": [
+          "en",
+          "ko"
+        ],
         "NSCameraUsageDescription": "Daydrop uses the camera so you can take and share your daily photo.",
         "NSPhotoLibraryUsageDescription": "Daydrop uses your photo library so you can choose a daily photo to share.",
         "NSPhotoLibraryAddUsageDescription": "Daydrop saves photos only when you choose to save them.",
@@ -33,7 +38,8 @@
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
         "android.permission.READ_MEDIA_IMAGES"
-      ]
+      ],
+      "package": "com.heeyeonkim112.daydrop"
     },
     "web": {
       "output": "static",
@@ -44,7 +50,7 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/splash-icon.png",
+          "image": "./assets/images/splash-logo.png",
           "imageWidth": 200,
           "resizeMode": "contain",
           "backgroundColor": "#000000",

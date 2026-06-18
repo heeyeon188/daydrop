@@ -90,6 +90,6 @@ export type TodayDropPayload = {
 };
 
 export type RecentDrop = DailyDrop & {
-  mission: Pick<Mission, 'prompt_ko' | 'prompt_en'> | null;
+  mission: Pick<Mission, 'prompt_ko' | 'prompt_en' | 'audience'> | null;
   drop_submissions: DropSubmission[];
 };

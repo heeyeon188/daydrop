@@ -21,13 +21,14 @@ const IMAGE_PREFETCH_TIMEOUT_MS = 1200;
 const prefetchedImageKeys = new Set<string>();
 const prefetchingImageKeys = new Set<string>();
 
-export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null, currentUserId?: string | null) {
+export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null, currentUserId?: string | null) {
   const [today, setToday] = React.useState<TodayDropPayload | null>(null);
   const [recentDrops, setRecentDrops] = React.useState<RecentDrop[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
   const [loadedOnce, setLoadedOnce] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const dropScopeKey = selectedCoupleId ?? 'solo';
   const hasLoaded = !enabled || loadedOnce;
   const refetchInFlightRef = React.useRef<Promise<RefetchResult> | null>(null);
   const realtimeRefetchTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -35,6 +36,8 @@ export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null
 
   const refetch = React.useCallback(
     async (isRefresh = false): Promise<RefetchResult> => {
+      void dropScopeKey;
+
       if (isRefresh) {
         lastExplicitRefreshAtRef.current = Date.now();
       }
@@ -91,7 +94,7 @@ export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null
       refetchInFlightRef.current = nextRefetch;
       return nextRefetch;
     },
-    [enabled]
+    [dropScopeKey, enabled]
   );
 
   const applyLocalSubmission = React.useCallback((submission: DropSubmission) => {
@@ -142,6 +145,13 @@ export function useTodayDrop(enabled: boolean, _selectedCoupleId?: string | null
       void refetch(true);
     }, REALTIME_REFETCH_DEBOUNCE_MS);
   }, [refetch]);
+
+  React.useEffect(() => {
+    refetchInFlightRef.current = null;
+    setToday(null);
+    setRecentDrops([]);
+    setLoadedOnce(false);
+  }, [dropScopeKey]);
 
   React.useEffect(() => {
     void refetch();

@@ -8,24 +8,44 @@ export function useSession() {
   const [loading, setLoading] = React.useState(true);
 
   React.useEffect(() => {
+    let mounted = true;
+
     if (supabaseConfigError) {
       setLoading(false);
       return;
     }
 
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setLoading(false);
-    });
+    async function loadSession() {
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (mounted) {
+          setSession(data.session);
+        }
+      } catch {
+        // Keep the existing null session state when the initial session lookup fails.
+      } finally {
+        if (mounted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadSession();
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!mounted) {
+        return;
+      }
       setSession(nextSession);
       setLoading(false);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
   return {
