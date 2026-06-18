@@ -49,7 +49,7 @@ import { findCountryOption, getCountryLabel, searchCountryOptions } from '@/lib/
 import { deleteAccount } from '@/services/account';
 import { logAppleSignInError, signInWithAppleIdToken, signInWithEmail, signInWithGoogle, signOut } from '@/services/auth';
 import { createCoupleInvite, disconnectPartnerConnection, joinCoupleByInviteCode, selectCouple, type MyCouple, type MyCoupleOption } from '@/services/couple';
-import { deleteMyTodayDropPhoto, submitDropPhoto } from '@/services/drops';
+import { deleteMyTodayDropPhoto, signRecentDropForDisplay, signRecentDropsForThumbnails, submitDropPhoto } from '@/services/drops';
 import {
   getNotificationPermissionState,
   getNotificationPreferences,
@@ -60,7 +60,7 @@ import {
   type NotificationPreferences,
 } from '@/services/notifications';
 import { completeProfile, updatePreferredLanguage, type ProfileInput } from '@/services/profile';
-import { normalizeCameraPhoto, type CameraFacing, type DaydropPhotoAsset } from '@/services/storage';
+import { createPhotoSignedUrl, normalizeCameraPhoto, type CameraFacing, type DaydropPhotoAsset } from '@/services/storage';
 import type { AuthUser, Couple, CoupleMember, DropState, DropSubmission, PartnerType, Profile, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
 const EMPTY_MEMBERS: CoupleMember[] = [];
@@ -71,7 +71,6 @@ const STORY_TEMPLATE_BASE_HEIGHT = 640;
 const STORY_TEMPLATE_PHOTO_WIDTH = 320;
 const STORY_TEMPLATE_PHOTO_HEIGHT = 294;
 const RECENT_THUMB_GROUP_WIDTH = 138;
-const RECENT_THUMB_SLOT_WIDTH = RECENT_THUMB_GROUP_WIDTH / 2;
 const RECENT_THUMB_DEFAULT_HEIGHT = 82;
 const HOME_RECENT_DROPS_LIMIT = 5;
 const LOCKED_PHOTO_BLUR_RADIUS = 320;
@@ -96,9 +95,13 @@ type ShareStoryData = SharePhotoPair & {
   date: string;
   leftLocation: string;
   leftName: string;
+  leftOriginalStoragePath?: string | null;
+  leftOriginalUri: string;
   mission: string;
   rightLocation: string;
   rightName: string;
+  rightOriginalStoragePath?: string | null;
+  rightOriginalUri: string;
 };
 type PhotoPreviewLayout = SharePhotoPair & {
   height: number;
@@ -205,7 +208,7 @@ export default function MissionScreen() {
   }, []);
 
   if (sessionLoading) {
-    return <AppLoadingScreen />;
+    return <AppLoadingScreen language={language} />;
   }
 
   if (configError) {
@@ -217,11 +220,11 @@ export default function MissionScreen() {
   }
 
   if (!profileState.hasLoaded) {
-    return <AppLoadingScreen />;
+    return <AppLoadingScreen language={language} />;
   }
 
   if (!myCouple.hasLoaded) {
-    return <AppLoadingScreen />;
+    return <AppLoadingScreen language={language} />;
   }
 
   if (!profileState.profile?.profile_completed) {
@@ -288,10 +291,11 @@ function MissionContent({
   profile: Profile;
 }) {
   const t = getTranslations(language);
-  const { today, recentDrops, hasLoaded: todayDropHasLoaded, refreshing, error, applyLocalSubmission, removeLocalSubmission, refetch } = useTodayDrop(true, myCouple?.couple.id, myUserId);
+  const { today, recentDrops, hasLoaded: todayDropHasLoaded, loading: todayDropLoading, refreshing, error, applyLocalSubmission, removeLocalSubmission, refetch } = useTodayDrop(true, myCouple?.couple.id, myUserId);
   const [deletingPhoto, setDeletingPhoto] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const [fullImage, setFullImage] = React.useState<FullImage | null>(null);
+  const [allDropsForModal, setAllDropsForModal] = React.useState<RecentDrop[]>([]);
   const [allDropsVisible, setAllDropsVisible] = React.useState(false);
   const [cameraVisible, setCameraVisible] = React.useState(false);
   const [connectVisible, setConnectVisible] = React.useState(false);
@@ -303,38 +307,61 @@ function MissionContent({
   const [storedPendingInviteCode, setStoredPendingInviteCode] = React.useState<string | null>(null);
   const [partnerDisconnectedNoticeVisible, setPartnerDisconnectedNoticeVisible] = React.useState(false);
   const processedInviteLinkRef = React.useRef<string | null>(null);
+  const allDropsSigningRequestRef = React.useRef(0);
+  const currentCoupleId = myCouple?.couple.id ?? null;
+  const scopedToday = React.useMemo(() => {
+    if (!currentCoupleId) {
+      return today;
+    }
+
+    return today?.daily_drop.couple_id === currentCoupleId ? today : null;
+  }, [currentCoupleId, today]);
+  const isTodayScopeStale = Boolean(today && !scopedToday);
+  const scopedRecentDrops = React.useMemo(() => {
+    if (!currentCoupleId) {
+      return recentDrops;
+    }
+
+    return recentDrops.filter((drop) => drop.couple_id === currentCoupleId);
+  }, [currentCoupleId, recentDrops]);
   const activePendingInviteCode = pendingInviteCode ?? storedPendingInviteCode;
-  const activeMembers = today?.members ?? myCouple?.members ?? EMPTY_MEMBERS;
+  const activeMembers = scopedToday?.members ?? myCouple?.members ?? EMPTY_MEMBERS;
   const members = React.useMemo(() => splitMembers(activeMembers, myUserId), [activeMembers, myUserId]);
-  const state = React.useMemo(() => getDropState(today, myUserId), [today, myUserId]);
+  const state = React.useMemo(() => getDropState(scopedToday, myUserId), [scopedToday, myUserId]);
   const sharePhotoPair = React.useMemo(() => {
-    if (!today || state !== 'both') {
+    if (!scopedToday || state !== 'both') {
       return null;
     }
 
-    const { mine, partner } = splitSubmissions(today.submissions, myUserId);
-    if (!mine?.image_url || !partner?.image_url) {
+    const { mine, partner } = splitSubmissions(scopedToday.submissions, myUserId);
+    const mineDisplayImage = getSubmissionDisplayImage(mine);
+    const partnerDisplayImage = getSubmissionDisplayImage(partner);
+    if (!mineDisplayImage || !partnerDisplayImage || !mine?.image_url || !partner?.image_url) {
       return null;
     }
 
     return {
-      date: formatStoryDate(today.daily_drop.drop_date),
+      date: formatStoryDate(scopedToday.daily_drop.drop_date),
       leftLocation: formatLocation(members.partner, language, t.cityFallbackPartner),
       leftName: displayMemberName(members.partner, t.partner),
-      leftUri: partner.image_url,
-      mission: getMissionPrompt(today.mission, language),
+      leftOriginalStoragePath: partner.storage_path,
+      leftOriginalUri: partner.image_url,
+      leftUri: partnerDisplayImage,
+      mission: getMissionPrompt(scopedToday.mission, language),
       rightLocation: formatLocation(members.me, language, t.cityFallbackMe),
       rightName: displayMemberName(members.me, t.me),
-      rightUri: mine.image_url,
+      rightOriginalStoragePath: mine.storage_path,
+      rightOriginalUri: mine.image_url,
+      rightUri: mineDisplayImage,
     };
-  }, [language, members.me, members.partner, myUserId, state, t.cityFallbackMe, t.cityFallbackPartner, t.me, t.partner, today]);
-  const hasPartner = Boolean(today?.couple.status === 'active' && members.partner);
+  }, [language, members.me, members.partner, myUserId, scopedToday, state, t.cityFallbackMe, t.cityFallbackPartner, t.me, t.partner]);
+  const hasPartner = Boolean(scopedToday?.couple.status === 'active' && members.partner);
   const shouldShowDisconnectedNotice = !hasPartner && (partnerDisconnectedNoticeVisible || Boolean(latestDisconnectedCouple));
   const isTodayUnlocked = hasPartner && state === 'both';
   const mainButtonDisabled = hasPartner ? (state === 'meOnly' || uploading || deletingPhoto) : uploading || deletingPhoto;
   const stateCopy = React.useMemo(() => getStateCopy(state, t, hasPartner), [hasPartner, state, t]);
   const meta = React.useMemo(() => buildMeta(members, language, t), [language, members, t]);
-  const missionTitle = React.useMemo(() => getMissionPrompt(today?.mission, language), [language, today?.mission]);
+  const missionTitle = React.useMemo(() => getMissionPrompt(scopedToday?.mission, language), [language, scopedToday?.mission]);
   const coupleOptions = React.useMemo(() => myCouple?.availableCouples ?? [], [myCouple?.availableCouples]);
   const pendingInviteCouple = React.useMemo(() => coupleOptions.find((option) => option.couple.status === 'pending') ?? null, [coupleOptions]);
   const inviteCode = pendingInviteCouple?.couple.invite_code ?? null;
@@ -344,7 +371,41 @@ function MissionContent({
   );
   const partnerCount = partnerOptions.length;
   const canAddPartner = partnerCount < 4;
-  const visibleRecentDrops = React.useMemo(() => recentDrops.slice(0, HOME_RECENT_DROPS_LIMIT), [recentDrops]);
+  const visibleRecentDrops = React.useMemo(() => scopedRecentDrops.slice(0, HOME_RECENT_DROPS_LIMIT), [scopedRecentDrops]);
+
+  React.useEffect(() => {
+    const requestId = allDropsSigningRequestRef.current + 1;
+    allDropsSigningRequestRef.current = requestId;
+
+    if (!allDropsVisible) {
+      setAllDropsForModal([]);
+      return;
+    }
+
+    setAllDropsForModal(scopedRecentDrops);
+    signRecentDropsForThumbnails(scopedRecentDrops)
+      .then((signedDrops) => {
+        if (allDropsSigningRequestRef.current === requestId) {
+          setAllDropsForModal(signedDrops);
+        }
+      })
+      .catch((nextError) => {
+        console.warn('[photo] all drops thumbnail signing failed; using existing URL fallbacks', nextError);
+      });
+  }, [allDropsVisible, scopedRecentDrops]);
+
+  const openDropDetail = React.useCallback(
+    async (drop: RecentDrop) => {
+      const signedDrop = await signRecentDropForDisplay(drop);
+      setDropDetail({ drop: signedDrop, state: getRecentDropState(signedDrop, myUserId) });
+    },
+    [myUserId]
+  );
+
+  const openAllDropsModal = React.useCallback(() => {
+    setAllDropsForModal(scopedRecentDrops);
+    setAllDropsVisible(true);
+  }, [scopedRecentDrops]);
 
   React.useEffect(() => {
     let mounted = true;
@@ -442,11 +503,11 @@ function MissionContent({
 
   const submitPhotoAsset = async (asset: DaydropPhotoAsset, source: CameraFacing) => {
     const alreadySubmitted = state === 'both' || (hasPartner && state === 'meOnly');
-    if (!today || alreadySubmitted || uploading || deletingPhoto) {
+    if (!scopedToday || alreadySubmitted || uploading || deletingPhoto) {
       return;
     }
 
-    const coupleId = today.daily_drop.couple_id ?? today.couple?.id;
+    const coupleId = scopedToday.daily_drop.couple_id ?? scopedToday.couple?.id;
     if (!coupleId) {
       Alert.alert(t.uploadError, t.unknownError);
       return;
@@ -464,7 +525,7 @@ function MissionContent({
       localSubmission = createLocalPhotoSubmission({
         asset,
         coupleId,
-        dropId: today.daily_drop.id,
+        dropId: scopedToday.daily_drop.id,
         userId: myUserId,
       });
       applyLocalSubmission(localSubmission);
@@ -485,7 +546,7 @@ function MissionContent({
       const submission = await submitDropPhoto({
         base64: picked.base64,
         coupleId,
-        dropId: today.daily_drop.id,
+        dropId: scopedToday.daily_drop.id,
         fileInfo: {
           base64Used: Boolean(picked.base64),
           capturedUri: asset.uri,
@@ -539,7 +600,7 @@ function MissionContent({
 
   const handleUpload = () => {
     const alreadySubmitted = state === 'both' || (hasPartner && state === 'meOnly');
-    if (!today || deletingPhoto || uploading || alreadySubmitted) {
+    if (!scopedToday || deletingPhoto || uploading || alreadySubmitted) {
       return;
     }
 
@@ -547,14 +608,14 @@ function MissionContent({
   };
 
   const handleDeleteMyPhoto = async () => {
-    if (!today || deletingPhoto) {
+    if (!scopedToday || deletingPhoto) {
       return;
     }
 
     try {
       setDeletingPhoto(true);
       await deleteMyTodayDropPhoto({
-        currentDropId: today.daily_drop.id,
+        currentDropId: scopedToday.daily_drop.id,
         currentUserId: myUserId,
       });
       setFullImage(null);
@@ -568,7 +629,7 @@ function MissionContent({
   };
 
   const confirmDeleteMyPhoto = () => {
-    if (!today || deletingPhoto) {
+    if (!scopedToday || deletingPhoto) {
       return;
     }
 
@@ -606,6 +667,11 @@ function MissionContent({
 
     try {
       setPartnerMenuVisible(false);
+      setFullImage(null);
+      setDropDetail(null);
+      setShareSheetVisible(false);
+      setAllDropsVisible(false);
+      setAllDropsForModal([]);
       onCoupleSelected(coupleId);
       await selectCouple(coupleId);
       await Promise.all([onCoupleChanged(), refetch(true)]);
@@ -627,10 +693,6 @@ function MissionContent({
     await refetch(true);
   };
 
-  if (!todayDropHasLoaded) {
-    return <AppLoadingScreen />;
-  }
-
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView
@@ -648,8 +710,9 @@ function MissionContent({
 
         {error ? <InlineMessage text={error} /> : null}
         {shouldShowDisconnectedNotice ? <InlineMessage text={t.disconnectPartnerNotice} /> : null}
+        {!scopedToday && (isTodayScopeStale || !todayDropHasLoaded || todayDropLoading) ? <InlineMessage text={t.loadingMission} /> : null}
 
-        {today ? (
+        {scopedToday ? (
           <>
             <View style={styles.missionCard}>
               <Text allowFontScaling={false} style={styles.dropLabel}>
@@ -673,7 +736,7 @@ function MissionContent({
                   hasPartner={hasPartner}
                   state={state}
                   t={t}
-                  today={today}
+                  today={scopedToday}
                 />
               </View>
             </View>
@@ -709,7 +772,7 @@ function MissionContent({
           <Text allowFontScaling={false} style={styles.recentTitle}>
             {t.recentDrops}
           </Text>
-          <Pressable style={styles.viewAll} onPress={() => setAllDropsVisible(true)}>
+          <Pressable style={styles.viewAll} onPress={openAllDropsModal}>
             <Text allowFontScaling={false} style={styles.viewAllText}>
               {t.viewAll}
             </Text>
@@ -718,7 +781,7 @@ function MissionContent({
         </View>
 
         <View style={styles.recentList}>
-          {recentDrops.length === 0 ? (
+          {scopedRecentDrops.length === 0 ? (
             <InlineMessage text={shouldShowDisconnectedNotice ? t.disconnectedHistoryHidden : t.noRecentDrops} />
           ) : (
             visibleRecentDrops.map((drop) => (
@@ -728,7 +791,9 @@ function MissionContent({
                 hasPartner={hasPartner}
                 language={language}
                 myUserId={myUserId}
-                onPress={() => setDropDetail({ drop, state: getRecentDropState(drop, myUserId) })}
+                onPress={() => {
+                  void openDropDetail(drop);
+                }}
               />
             ))
           )}
@@ -743,13 +808,15 @@ function MissionContent({
         t={t}
       />
       <AllDropsModal
-        drops={recentDrops}
+        drops={allDropsForModal}
         hasPartner={hasPartner}
         language={language}
         myUserId={myUserId}
         t={t}
         onClose={() => setAllDropsVisible(false)}
-        onOpenDrop={(drop) => setDropDetail({ drop, state: getRecentDropState(drop, myUserId) })}
+        onOpenDrop={(drop) => {
+          void openDropDetail(drop);
+        }}
         visible={allDropsVisible}
       />
       <DropDetailModal
@@ -1462,7 +1529,7 @@ function getSubmissionDisplayImage(submission: DropSubmission | null | undefined
 }
 
 function getSubmissionThumbnailImage(submission: DropSubmission | null | undefined) {
-  return getNonEmptyString(submission?.thumbnail_image_url) || getSubmissionDisplayImage(submission);
+  return getNonEmptyString(submission?.thumbnail_image_url) || getNonEmptyString(submission?.image_url);
 }
 
 function getNonEmptyString(value: string | null | undefined) {
@@ -1740,17 +1807,13 @@ function RecentDropRow({
   const shouldLock = hasPartner && !mine && Boolean(partner);
   const mineImage = getSubmissionThumbnailImage(mine);
   const partnerImage = getSubmissionThumbnailImage(partner);
-  const mineSize = useImageSize(mineImage);
-  const partnerSize = useImageSize(partnerImage);
-  const mineHeight = calculateImageHeight(RECENT_THUMB_SLOT_WIDTH, mineSize, RECENT_THUMB_DEFAULT_HEIGHT);
-  const partnerHeight = calculateImageHeight(RECENT_THUMB_SLOT_WIDTH, partnerSize, RECENT_THUMB_DEFAULT_HEIGHT);
-  const thumbHeight = Math.max(mine ? mineHeight : 0, partner ? partnerHeight : 0, RECENT_THUMB_DEFAULT_HEIGHT);
+  const thumbHeight = RECENT_THUMB_DEFAULT_HEIGHT;
 
   return (
-    <Pressable onPress={onPress} style={[styles.recentRow, { minHeight: Math.max(88, thumbHeight + 6) }]}>
+    <Pressable onPress={onPress} style={styles.recentRow}>
       <View style={[styles.recentThumbs, { height: thumbHeight }]}>
-        <RecentThumb height={partner ? partnerHeight : thumbHeight} image={partnerImage} locked={shouldLock} side="left" />
-        <RecentThumb height={mine ? mineHeight : thumbHeight} image={mineImage} locked={false} side="right" />
+        <RecentThumb height={thumbHeight} image={partnerImage} locked={shouldLock} side="left" />
+        <RecentThumb height={thumbHeight} image={mineImage} locked={false} side="right" />
       </View>
       <View style={styles.recentInfo}>
         <Text allowFontScaling={false} style={styles.recentDate}>
@@ -1855,6 +1918,10 @@ function AllDropsModal({
   t: Copy;
   visible: boolean;
 }) {
+  if (!visible) {
+    return null;
+  }
+
   return (
     <Modal animationType="slide" visible={visible} onRequestClose={onClose}>
       <SafeAreaView style={styles.safeArea}>
@@ -2056,8 +2123,9 @@ function TodayShareSheet({
 
     try {
       setPhotoPreviewLoading(true);
-      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(shareData.leftUri), getRemoteImageSize(shareData.rightUri)]);
-      setPhotoPreviewLayout(createPhotoPreviewLayout(shareData, leftSize, rightSize, windowDimensions.width, windowDimensions.height, insets));
+      const originalShareData = await prepareOriginalShareData(shareData);
+      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(originalShareData.leftUri), getRemoteImageSize(originalShareData.rightUri)]);
+      setPhotoPreviewLayout(createPhotoPreviewLayout(originalShareData, leftSize, rightSize, windowDimensions.width, windowDimensions.height, insets));
     } catch (nextError) {
       console.error('view today drop photo failed', nextError);
       Alert.alert(t.photoView, nextError instanceof Error && nextError.message === 'photo_read_failed' ? t.photoReadError : t.unknownError);
@@ -2078,8 +2146,9 @@ function TodayShareSheet({
 
     try {
       setSharingStory(true);
-      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(shareData.leftUri), getRemoteImageSize(shareData.rightUri)]);
-      const nextLayout = createShareStoryLayout(shareData, leftSize, rightSize, language);
+      const originalShareData = await prepareOriginalShareData(shareData);
+      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(originalShareData.leftUri), getRemoteImageSize(originalShareData.rightUri)]);
+      const nextLayout = createShareStoryLayout(originalShareData, leftSize, rightSize, language);
       let templateReadyTimeout: ReturnType<typeof setTimeout> | null = null;
       const templateReadyPromise = new Promise<void>((resolve, reject) => {
         storyImageLoadCountRef.current = 0;
@@ -3219,43 +3288,6 @@ function NotificationToggleRow({
   );
 }
 
-function useImageSize(image?: string): ImageSize | null {
-  const [size, setSize] = React.useState<ImageSize | null>(() => (image ? imageSizeCache.get(image) ?? null : null));
-
-  React.useEffect(() => {
-    let mounted = true;
-
-    if (!image) {
-      setSize(null);
-      return;
-    }
-
-    const cachedSize = imageSizeCache.get(image);
-    if (cachedSize) {
-      setSize(cachedSize);
-      return;
-    }
-
-    setSize(null);
-    getCachedRemoteImageSize(image)
-      .then((nextSize) => {
-        if (mounted) {
-          setSize(nextSize);
-          console.log('[photo] display image size', { uri: image, width: nextSize.width, height: nextSize.height });
-        }
-      })
-      .catch((error) => {
-        console.warn('[photo] display image size lookup failed', { uri: image, error });
-      });
-
-    return () => {
-      mounted = false;
-    };
-  }, [image]);
-
-  return size;
-}
-
 function getRemoteImageSize(image: string): Promise<ImageSize> {
   return getCachedRemoteImageSize(image);
 }
@@ -3298,6 +3330,33 @@ function loadRemoteImageSize(image: string): Promise<ImageSize> {
       () => reject(new Error('photo_read_failed'))
     );
   });
+}
+
+async function prepareOriginalShareData(data: ShareStoryData): Promise<ShareStoryData> {
+  const [leftUri, rightUri] = await Promise.all([
+    getOriginalShareUri(data.leftOriginalUri, data.leftOriginalStoragePath),
+    getOriginalShareUri(data.rightOriginalUri, data.rightOriginalStoragePath),
+  ]);
+
+  return {
+    ...data,
+    leftUri,
+    rightUri,
+  };
+}
+
+async function getOriginalShareUri(originalUri: string, storagePath?: string | null) {
+  const normalizedPath = storagePath?.trim();
+  if (!normalizedPath || normalizedPath.startsWith('local://')) {
+    return originalUri;
+  }
+
+  try {
+    return await createPhotoSignedUrl(normalizedPath);
+  } catch (error) {
+    console.warn('[share] original image signing failed; using existing URL fallback', { storagePath: normalizedPath, error });
+    return originalUri;
+  }
 }
 
 function createPhotoPreviewLayout(
@@ -3485,14 +3544,6 @@ function waitForNextFrame() {
       requestAnimationFrame(() => resolve());
     });
   });
-}
-
-function calculateImageHeight(slotWidth: number, size: ImageSize | null, fallbackHeight: number) {
-  if (slotWidth <= 0 || !size || size.width <= 0 || size.height <= 0) {
-    return fallbackHeight;
-  }
-
-  return slotWidth * (size.height / size.width);
 }
 
 function isDeleteConfirmText(value: string) {
@@ -3929,7 +3980,7 @@ function CoupleConnectScreen({
   const [code, setCode] = React.useState('');
   const [createdCode, setCreatedCode] = React.useState(inviteCode);
   const [createdPartnerType, setCreatedPartnerType] = React.useState(invitePartnerType ?? currentPartnerType);
-  const [loading, setLoading] = React.useState(false);
+  const [pendingAction, setPendingAction] = React.useState<'create' | 'join' | 'regenerate' | null>(null);
   const [partnerType, setPartnerType] = React.useState<PartnerType | null>(null);
   const processedInviteCodeRef = React.useRef<string | null>(null);
   const canShowCreatedCode = Boolean(createdCode && createdPartnerType);
@@ -3951,7 +4002,7 @@ function CoupleConnectScreen({
       return;
     }
 
-    setLoading(true);
+    setPendingAction('create');
     try {
       const nextCode = await createCoupleInvite(partnerType);
       setCreatedCode(nextCode);
@@ -3961,25 +4012,27 @@ function CoupleConnectScreen({
       console.error('create invite failed', error);
       Alert.alert(t.inviteCodeError, t.unknownError);
     } finally {
-      setLoading(false);
+      setPendingAction(null);
     }
   };
 
   const regenerateInvite = async () => {
-    if (!createdPartnerType || loading) {
+    const nextPartnerType = partnerType ?? createdPartnerType;
+    if (!nextPartnerType || pendingAction === 'regenerate') {
       return;
     }
 
-    setLoading(true);
+    setPendingAction('regenerate');
     try {
-      const nextCode = await createCoupleInvite(createdPartnerType);
+      const nextCode = await createCoupleInvite(nextPartnerType);
       setCreatedCode(nextCode);
+      setCreatedPartnerType(nextPartnerType);
       await onInviteCreated();
     } catch (error) {
       console.error('regenerate invite failed', error);
       Alert.alert(t.inviteCodeError, t.unknownError);
     } finally {
-      setLoading(false);
+      setPendingAction(null);
     }
   };
 
@@ -4017,7 +4070,7 @@ function CoupleConnectScreen({
     }
 
     setCode(normalizedCode);
-    setLoading(true);
+    setPendingAction('join');
     try {
       await joinCoupleByInviteCode(normalizedCode);
       await onConnected();
@@ -4026,7 +4079,7 @@ function CoupleConnectScreen({
       console.error('join invite failed', error);
       Alert.alert(t.joinError, getJoinInviteErrorMessage(error, t));
     } finally {
-      setLoading(false);
+      setPendingAction(null);
     }
   }, [code, onClose, onConnected, t]);
 
@@ -4084,13 +4137,18 @@ function CoupleConnectScreen({
 
           {canShowCreatedCode ? (
             <View style={styles.inviteReadyWrap}>
+              <PartnerTypeSelector
+                disabled={pendingAction === 'regenerate'}
+                partnerType={partnerType ?? createdPartnerType}
+                setPartnerType={setPartnerType}
+                t={t}
+              />
               <Pressable
-                disabled={loading}
                 onPress={async () => {
                   await Clipboard.setStringAsync(createdCode!);
                   Alert.alert(t.copyDone, t.inviteCode);
                 }}
-                style={[styles.inviteCodeBox, loading && styles.disabledButton]}>
+                style={styles.inviteCodeBox}>
                 <Text allowFontScaling={false} style={styles.inviteCode}>
                   {createdCode}
                 </Text>
@@ -4099,27 +4157,27 @@ function CoupleConnectScreen({
                 </Text>
               </Pressable>
               <View style={styles.inviteActionRow}>
-                <Pressable disabled={loading} onPress={shareInvite} style={[styles.inviteActionButton, loading && styles.disabledButton]}>
+                <Pressable onPress={shareInvite} style={styles.inviteActionButton}>
                   <Feather name="share-2" size={18} color="#111111" style={styles.inviteActionIcon} />
                   <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.inviteActionText}>
                     {language === 'ko' ? '초대 공유하기' : 'Share invite'}
                   </Text>
                 </Pressable>
                 <Pressable
-                  disabled={loading}
                   onPress={async () => {
                     await Clipboard.setStringAsync(createdCode!);
                     Alert.alert(t.copyDone, t.inviteCode);
                   }}
-                  style={[styles.inviteActionButton, loading && styles.disabledButton]}>
+                  style={styles.inviteActionButton}>
                   <Feather name="copy" size={18} color="#111111" style={styles.inviteActionIcon} />
                   <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.inviteActionText}>
                     {language === 'ko' ? '복사하기' : 'Copy'}
                   </Text>
                 </Pressable>
-                <Pressable disabled={loading} onPress={regenerateInvite} style={[styles.inviteActionButton, loading && styles.disabledButton]}>
-                  <Feather name="refresh-cw" size={18} color="#111111" style={styles.inviteActionIcon} />
-                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={styles.inviteActionText}>
+                <Pressable disabled={pendingAction === 'regenerate'} onPress={regenerateInvite} style={[styles.inviteActionButton, styles.inviteActionButtonPrimary]}>
+                  {pendingAction === 'regenerate' ? <ActivityIndicator color="#FFFFFF" /> : null}
+                  <Feather name="refresh-cw" size={18} color="#FFFFFF" style={[styles.inviteActionIcon, pendingAction === 'regenerate' && styles.hidden]} />
+                  <Text allowFontScaling={false} adjustsFontSizeToFit minimumFontScale={0.82} numberOfLines={1} style={[styles.inviteActionText, styles.inviteActionTextPrimary, pendingAction === 'regenerate' && styles.hidden]}>
                     {language === 'ko' ? '새 코드' : 'New code'}
                   </Text>
                 </Pressable>
@@ -4128,12 +4186,12 @@ function CoupleConnectScreen({
           ) : (
             <>
               <PartnerTypeSelector
-                disabled={loading}
+                disabled={pendingAction === 'create'}
                 partnerType={partnerType}
                 setPartnerType={setPartnerType}
                 t={t}
               />
-              <Pressable disabled={loading || !partnerType} onPress={createInvite} style={[styles.primaryButton, (loading || !partnerType) && styles.disabledButton]}>
+              <Pressable disabled={pendingAction === 'create' || !partnerType} onPress={createInvite} style={[styles.primaryButton, (pendingAction === 'create' || !partnerType) && styles.disabledButton]}>
                 <Text allowFontScaling={false} style={[styles.primaryButtonText, !partnerType && styles.disabledButtonText]}>
                   {t.createInvite}
                 </Text>
@@ -4156,7 +4214,7 @@ function CoupleConnectScreen({
               value={code}
             />
           </View>
-          <Pressable disabled={loading} onPress={() => joinInvite()} style={[styles.outlineButton, loading && styles.disabledButton]}>
+          <Pressable disabled={pendingAction === 'join'} onPress={() => joinInvite()} style={[styles.outlineButton, pendingAction === 'join' && styles.disabledButton]}>
             <Text allowFontScaling={false} style={styles.outlineButtonText}>
               {t.joinByCode}
             </Text>
@@ -4326,9 +4384,9 @@ function CenteredState({ text }: { text: string }) {
   );
 }
 
-function AppLoadingScreen() {
-  const language = getPreferredOrDeviceLanguage();
-  const subtitle = language === 'ko' ? '오늘을 공유하는 가장 쉬운 방법' : 'The easiest way to share your day';
+function AppLoadingScreen({ language: preferredLanguage }: { language?: Language }) {
+  const language = getPreferredOrDeviceLanguage(preferredLanguage);
+  const subtitle = language === 'ko' ? '\uC624\uB298\uC744 \uACF5\uC720\uD558\uB294 \uAC00\uC7A5 \uC26C\uC6B4 \uBC29\uBC95' : 'The easiest way to share your day';
 
   return (
     <SafeAreaView style={styles.appLoadingScreen}>
@@ -4336,9 +4394,11 @@ function AppLoadingScreen() {
         <Text allowFontScaling={false} style={styles.appLoadingLogo}>
           DAYDROP
         </Text>
-        <Text allowFontScaling={false} style={[styles.appLoadingSubtitle, language === 'ko' ? styles.appLoadingSubtitleKo : styles.appLoadingSubtitleEn]}>
-          {subtitle}
-        </Text>
+        <View style={styles.appLoadingSubtitleWrap}>
+          <Text allowFontScaling={false} numberOfLines={1} style={[styles.appLoadingSubtitle, language === 'ko' ? styles.appLoadingSubtitleKo : styles.appLoadingSubtitleEn]}>
+            {subtitle}
+          </Text>
+        </View>
       </View>
     </SafeAreaView>
   );
@@ -4454,7 +4514,10 @@ const styles = StyleSheet.create({
   },
   appLoadingContent: {
     alignItems: 'center',
-    transform: [{ translateY: 18 }],
+    height: 92,
+    justifyContent: 'flex-start',
+    transform: [{ translateY: -56 }],
+    width: '100%',
   },
   appLoadingLogo: {
     color: '#FFFFFF',
@@ -4463,10 +4526,18 @@ const styles = StyleSheet.create({
     letterSpacing: 10,
     paddingLeft: 10,
   },
+  appLoadingSubtitleWrap: {
+    alignItems: 'center',
+    height: 28,
+    justifyContent: 'center',
+    marginTop: 14,
+    width: '100%',
+  },
   appLoadingSubtitle: {
     color: 'rgba(255, 255, 255, 0.62)',
     fontWeight: '400',
-    marginTop: 18,
+    lineHeight: 21,
+    paddingHorizontal: 24,
     textAlign: 'center',
   },
   appLoadingSubtitleKo: {
@@ -4474,6 +4545,9 @@ const styles = StyleSheet.create({
   },
   appLoadingSubtitleEn: {
     fontSize: 14,
+  },
+  hidden: {
+    display: 'none',
   },
   safeArea: {
     backgroundColor: '#FFFCF7',
@@ -6139,7 +6213,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#FFFEFA',
     borderColor: '#DED9CF',
-    borderRadius: 16,
+    borderRadius: 10,
     borderWidth: 1,
     flex: 1,
     flexDirection: 'row',
@@ -6148,6 +6222,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 14,
   },
+  inviteActionButtonPrimary: {
+    backgroundColor: '#111111',
+    borderColor: '#111111',
+  },
   inviteActionIcon: {
     marginTop: 1,
   },
@@ -6155,6 +6233,9 @@ const styles = StyleSheet.create({
     color: '#111111',
     fontSize: 15,
     fontWeight: '800',
+  },
+  inviteActionTextPrimary: {
+    color: '#FFFFFF',
   },
   joinSection: {
     marginTop: 4,

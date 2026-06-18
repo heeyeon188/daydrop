@@ -14,6 +14,8 @@ import type { DropSubmission, PartnerType, RecentDrop, TodayDropPayload } from '
 const RECENT_DROPS_LIMIT = 10;
 const RECENT_DROPS_QUERY_LIMIT = 30;
 
+type RecentDropSigningMode = 'display' | 'thumbnail';
+
 export async function getOrCreateTodayDrop(): Promise<TodayDropPayload> {
   const { data, error } = await supabase.rpc('get_or_create_today_drop');
   if (error) {
@@ -362,7 +364,16 @@ export async function deletePhotoSubmission(submissionId: string) {
   return deleteData as DeleteMyTodayDropPhotoResult;
 }
 
-export async function getRecentDrops(coupleId: string): Promise<RecentDrop[]> {
+export async function getRecentDrops(
+  coupleId: string,
+  {
+    signedDropLimit = RECENT_DROPS_LIMIT,
+    signingMode = 'display',
+  }: {
+    signedDropLimit?: number;
+    signingMode?: RecentDropSigningMode;
+  } = {}
+): Promise<RecentDrop[]> {
   const { data: couple, error: coupleError } = await supabase
     .from('couples')
     .select('connected_at, partner_type, status')
@@ -404,7 +415,16 @@ export async function getRecentDrops(coupleId: string): Promise<RecentDrop[]> {
     .filter((drop) => drop.drop_submissions.length > 0)
     .slice(0, RECENT_DROPS_LIMIT);
 
-  return Promise.all(dropsWithPhotos.map(signRecentPhotoUrls));
+  const signedDrops = await signRecentDrops(dropsWithPhotos.slice(0, signedDropLimit), signingMode);
+  return [...signedDrops, ...dropsWithPhotos.slice(signedDropLimit)];
+}
+
+export async function signRecentDropsForThumbnails(drops: RecentDrop[]) {
+  return signRecentDrops(drops, 'thumbnail');
+}
+
+export async function signRecentDropForDisplay(drop: RecentDrop) {
+  return signRecentPhotoUrls(drop, 'display');
 }
 
 function getPartnerType(value: unknown): PartnerType | null {
@@ -435,14 +455,18 @@ function isVisibleRecentSubmission(
 async function signTodayPhotoUrls(payload: TodayDropPayload) {
   return {
     ...payload,
-    submissions: await signSubmissionUrls(payload.submissions, { signOriginal: 'always' }),
+    submissions: await signSubmissionUrls(payload.submissions, { usage: 'display' }),
   };
 }
 
-async function signRecentPhotoUrls(drop: RecentDrop) {
+function signRecentDrops(drops: RecentDrop[], signingMode: RecentDropSigningMode) {
+  return Promise.all(drops.map((drop) => signRecentPhotoUrls(drop, signingMode)));
+}
+
+async function signRecentPhotoUrls(drop: RecentDrop, signingMode: RecentDropSigningMode = 'display') {
   return {
     ...drop,
-    drop_submissions: await signSubmissionUrls(drop.drop_submissions, { signOriginal: 'fallback' }),
+    drop_submissions: await signSubmissionUrls(drop.drop_submissions, { usage: signingMode }),
   };
 }
 
@@ -461,7 +485,7 @@ async function signSubmissionUrls<
   },
 >(
   submissions: T[],
-  options: { signOriginal: 'always' | 'fallback' }
+  options: { usage: RecentDropSigningMode }
 ) {
   const signedUrlByPath = new Map<string, Promise<string>>();
 
@@ -469,9 +493,11 @@ async function signSubmissionUrls<
     submissions.map((submission) => {
       const displayPath = submission.display_storage_path?.trim();
       const thumbnailPath = submission.thumbnail_storage_path?.trim();
-      const shouldSignOriginal = options.signOriginal === 'always' || (!displayPath && !thumbnailPath);
+      const shouldSignDisplay = options.usage === 'display' && Boolean(displayPath);
+      const shouldSignThumbnail = Boolean(thumbnailPath);
+      const shouldSignOriginal = options.usage === 'thumbnail' ? !thumbnailPath : !displayPath && !thumbnailPath;
 
-      if (!shouldSignOriginal && !displayPath && !thumbnailPath) {
+      if (!shouldSignOriginal && !shouldSignDisplay && !shouldSignThumbnail) {
         return submission;
       }
 
@@ -479,17 +505,17 @@ async function signSubmissionUrls<
       if (shouldSignOriginal && storagePath && !signedUrlByPath.has(storagePath)) {
         signedUrlByPath.set(storagePath, createPhotoSignedUrl(storagePath));
       }
-      if (displayPath && !signedUrlByPath.has(displayPath)) {
+      if (shouldSignDisplay && displayPath && !signedUrlByPath.has(displayPath)) {
         signedUrlByPath.set(displayPath, createPhotoSignedUrl(displayPath));
       }
-      if (thumbnailPath && !signedUrlByPath.has(thumbnailPath)) {
+      if (shouldSignThumbnail && thumbnailPath && !signedUrlByPath.has(thumbnailPath)) {
         signedUrlByPath.set(thumbnailPath, createPhotoSignedUrl(thumbnailPath));
       }
       return signSubmissionUrl(
         submission,
         shouldSignOriginal && storagePath ? signedUrlByPath.get(storagePath) : undefined,
-        displayPath ? signedUrlByPath.get(displayPath) : undefined,
-        thumbnailPath ? signedUrlByPath.get(thumbnailPath) : undefined
+        shouldSignDisplay && displayPath ? signedUrlByPath.get(displayPath) : undefined,
+        shouldSignThumbnail && thumbnailPath ? signedUrlByPath.get(thumbnailPath) : undefined
       );
     })
   );

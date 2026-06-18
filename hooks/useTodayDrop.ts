@@ -15,7 +15,7 @@ type PrefetchImage = {
   url: string;
 };
 
-const RECENT_PREFETCH_DROP_LIMIT = 4;
+const HOME_RECENT_DROPS_LIMIT = 5;
 const REALTIME_REFETCH_DEBOUNCE_MS = 1200;
 const IMAGE_PREFETCH_TIMEOUT_MS = 1200;
 const prefetchedImageKeys = new Set<string>();
@@ -30,6 +30,7 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
   const [error, setError] = React.useState<string | null>(null);
   const dropScopeKey = selectedCoupleId ?? 'solo';
   const hasLoaded = !enabled || loadedOnce;
+  const dropScopeKeyRef = React.useRef(dropScopeKey);
   const refetchInFlightRef = React.useRef<Promise<RefetchResult> | null>(null);
   const realtimeRefetchTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastExplicitRefreshAtRef = React.useRef(0);
@@ -54,6 +55,7 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
       }
 
       const nextRefetch = (async () => {
+        const requestScopeKey = dropScopeKey;
         const refetchTimerLabel = '[photo] home refetch/signed URL regeneration';
         if (isRefresh) {
           setRefreshing(true);
@@ -67,9 +69,18 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
             console.time(refetchTimerLabel);
           }
           const nextToday = await getOrCreateTodayDrop();
+          if (dropScopeKeyRef.current !== requestScopeKey) {
+            return null;
+          }
           setToday((current) => (areTodayImageUrlsEqual(current, nextToday) ? current : nextToday));
 
-          const nextRecentDrops = await getRecentDrops(nextToday.daily_drop.couple_id);
+          const nextRecentDrops = await getRecentDrops(nextToday.daily_drop.couple_id, {
+            signedDropLimit: HOME_RECENT_DROPS_LIMIT,
+            signingMode: 'thumbnail',
+          });
+          if (dropScopeKeyRef.current !== requestScopeKey) {
+            return null;
+          }
           setRecentDrops((current) => (areRecentImageUrlsEqual(current, nextRecentDrops) ? current : nextRecentDrops));
           await prefetchDropImageUrls([...collectTodayImageUrls(nextToday), ...collectRecentImageUrls(nextRecentDrops)], isRefresh ? 0 : IMAGE_PREFETCH_TIMEOUT_MS);
           return {
@@ -77,6 +88,9 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
             today: nextToday,
           };
         } catch (nextError) {
+          if (dropScopeKeyRef.current !== requestScopeKey) {
+            return null;
+          }
           console.error('load today drop failed', nextError);
           setError('네트워크 상태를 확인하고 다시 시도해주세요.');
           return null;
@@ -84,10 +98,12 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
           if (__DEV__) {
             console.timeEnd(refetchTimerLabel);
           }
-          setLoadedOnce(true);
-          setLoading(false);
-          setRefreshing(false);
-          refetchInFlightRef.current = null;
+          if (dropScopeKeyRef.current === requestScopeKey) {
+            setLoadedOnce(true);
+            setLoading(false);
+            setRefreshing(false);
+            refetchInFlightRef.current = null;
+          }
         }
       })();
 
@@ -147,6 +163,7 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
   }, [refetch]);
 
   React.useEffect(() => {
+    dropScopeKeyRef.current = dropScopeKey;
     refetchInFlightRef.current = null;
     setToday(null);
     setRecentDrops([]);
@@ -214,7 +231,7 @@ function collectTodayImageUrls(today: TodayDropPayload): PrefetchImage[] {
 }
 
 function collectRecentImageUrls(drops: RecentDrop[]): PrefetchImage[] {
-  return drops.slice(0, RECENT_PREFETCH_DROP_LIMIT).flatMap((drop) => collectSubmissionImages(drop.drop_submissions, 'thumbnail'));
+  return drops.slice(0, HOME_RECENT_DROPS_LIMIT).flatMap((drop) => collectSubmissionImages(drop.drop_submissions, 'thumbnail'));
 }
 
 function collectSubmissionImages(submissions: DropSubmission[], usage: 'display' | 'thumbnail'): PrefetchImage[] {
@@ -235,7 +252,7 @@ function getSubmissionDisplayImage(submission: DropSubmission) {
 }
 
 function getSubmissionThumbnailImage(submission: DropSubmission) {
-  return getNonEmptyString(submission.thumbnail_image_url) || getSubmissionDisplayImage(submission);
+  return getNonEmptyString(submission.thumbnail_image_url) || getNonEmptyString(submission.image_url);
 }
 
 function getSubmissionImageCacheKey(submission: DropSubmission, usage: 'display' | 'thumbnail', fallbackUrl: string) {
