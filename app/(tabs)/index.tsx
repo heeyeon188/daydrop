@@ -79,6 +79,8 @@ const HOME_IMAGE_TRANSITION_MS = 180;
 const TODAY_DROP_PENDING_TEXT_COLOR = '#666666';
 const TODAY_DROP_PENDING_ICON_COLOR = '#7890AE';
 const INVITE_LINK_SAVE_DEDUPE_MS = 3000;
+const inviteCodesInFlight = new Set<string>();
+const handledInviteCodes = new Set<string>();
 const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
   dailyQuestion: true,
   partnerConnected: true,
@@ -285,7 +287,13 @@ export default function MissionScreen() {
       const nextCode = getInviteCodeFromURL(url);
       const now = Date.now();
       const lastSaved = lastSavedInviteCodeRef.current;
-      if (!mounted || !nextCode || (lastSaved?.code === nextCode && now - lastSaved.savedAt < INVITE_LINK_SAVE_DEDUPE_MS)) {
+      if (
+        !mounted ||
+        !nextCode ||
+        inviteCodesInFlight.has(nextCode) ||
+        handledInviteCodes.has(nextCode) ||
+        (lastSaved?.code === nextCode && now - lastSaved.savedAt < INVITE_LINK_SAVE_DEDUPE_MS)
+      ) {
         return;
       }
 
@@ -577,12 +585,23 @@ function MissionContent({
 
   React.useEffect(() => {
     const nextCode = normalizeInviteCode(activePendingInviteCode);
-    if (!nextCode || inviteProcessingRef.current || processedInviteLinkRef.current === nextCode) {
+    if (!nextCode) {
+      return;
+    }
+    if (
+      inviteProcessingRef.current ||
+      processedInviteLinkRef.current === nextCode ||
+      inviteCodesInFlight.has(nextCode) ||
+      handledInviteCodes.has(nextCode)
+    ) {
+      clearPendingInviteCode();
       return;
     }
 
     inviteProcessingRef.current = true;
     processedInviteLinkRef.current = nextCode;
+    inviteCodesInFlight.add(nextCode);
+    handledInviteCodes.add(nextCode);
     clearPendingInviteCode();
     if (mountedRef.current) {
       setConnectVisible(false);
@@ -609,10 +628,9 @@ function MissionContent({
         await onCoupleChanged();
         shouldShowSuccess = true;
       } catch (nextError) {
-        console.error('join invite failed', nextError);
         const inviteErrorType = getJoinInviteErrorType(nextError);
-        if (inviteErrorType === 'invalid' || inviteErrorType === 'unknown') {
-          processedInviteLinkRef.current = null;
+        if (inviteErrorType === 'unknown') {
+          console.error('join invite failed', nextError);
         }
         if (inviteErrorType === 'alreadyConnected') {
           await onCoupleChanged();
@@ -622,6 +640,7 @@ function MissionContent({
         }
       } finally {
         inviteProcessingRef.current = false;
+        inviteCodesInFlight.delete(nextCode);
         if (mountedRef.current) {
           router.replace('/(tabs)');
           if (shouldShowSuccess) {

@@ -20,6 +20,7 @@ const REALTIME_REFETCH_DEBOUNCE_MS = 1200;
 const IMAGE_PREFETCH_TIMEOUT_MS = 1200;
 const prefetchedImageKeys = new Set<string>();
 const prefetchingImageKeys = new Set<string>();
+let realtimeChannelInstanceId = 0;
 
 export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null, currentUserId?: string | null) {
   const [today, setToday] = React.useState<TodayDropPayload | null>(null);
@@ -197,24 +198,24 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
       return undefined;
     }
 
-    const channel = supabase
-      .channel(`drop-submissions-${coupleId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'drop_submissions',
-          filter: `couple_id=eq.${coupleId}`,
-        },
-        (payload) => {
-          if (currentUserId && getRealtimePayloadUserId(payload) === currentUserId) {
-            return;
-          }
-          scheduleRealtimeRefetch();
+    realtimeChannelInstanceId += 1;
+    const channel = supabase.channel(`drop-submissions-${coupleId}-${realtimeChannelInstanceId}`);
+    channel.on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'drop_submissions',
+        filter: `couple_id=eq.${coupleId}`,
+      },
+      (payload) => {
+        if (currentUserId && getRealtimePayloadUserId(payload) === currentUserId) {
+          return;
         }
-      )
-      .subscribe();
+        scheduleRealtimeRefetch();
+      }
+    );
+    channel.subscribe();
 
     return () => {
       supabase.removeChannel(channel);
