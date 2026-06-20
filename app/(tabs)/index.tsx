@@ -412,7 +412,8 @@ function MissionContent({
   profile: Profile;
 }) {
   const t = getTranslations(language);
-  const { today, recentDrops, hasLoaded: todayDropHasLoaded, loading: todayDropLoading, refreshing, error, applyLocalSubmission, removeLocalSubmission, refetch } = useTodayDrop(true, myCouple?.couple.id, myUserId);
+  const [partnerSwitching, setPartnerSwitching] = React.useState(false);
+  const { today, recentDrops, hasLoaded: todayDropHasLoaded, loading: todayDropLoading, refreshing, error, applyLocalSubmission, removeLocalSubmission, refetch } = useTodayDrop(!partnerSwitching, myCouple?.couple.id, myUserId);
   const [deletingPhoto, setDeletingPhoto] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const [fullImage, setFullImage] = React.useState<FullImage | null>(null);
@@ -479,7 +480,12 @@ function MissionContent({
     };
   }, [language, members.me, members.partner, myUserId, scopedToday, state, t.cityFallbackMe, t.cityFallbackPartner, t.me, t.partner]);
   const hasPartner = Boolean(scopedToday?.couple.status === 'active' && members.partner);
-  const shouldShowDisconnectedNotice = !hasPartner && (partnerDisconnectedNoticeVisible || Boolean(latestDisconnectedCouple));
+  const shouldShowDisconnectedNotice =
+    !partnerSwitching &&
+    !currentCoupleId &&
+    latestDisconnectedCouple?.status === 'disconnected' &&
+    (partnerDisconnectedNoticeVisible || Boolean(latestDisconnectedCouple));
+  const dropContentLoading = partnerSwitching || isTodayScopeStale || !todayDropHasLoaded || todayDropLoading;
   const isTodayUnlocked = hasPartner && state === 'both';
   const mainButtonDisabled = hasPartner ? (state === 'meOnly' || uploading || deletingPhoto) : uploading || deletingPhoto;
   const stateCopy = React.useMemo(() => getStateCopy(state, t, hasPartner), [hasPartner, state, t]);
@@ -826,20 +832,33 @@ function MissionContent({
       return;
     }
 
+    const previousCoupleId = myCouple?.couple.id ?? null;
+
     try {
+      setPartnerSwitching(true);
+      onCoupleSelected(coupleId);
       setPartnerMenuVisible(false);
       setFullImage(null);
       setDropDetail(null);
       setShareSheetVisible(false);
       setAllDropsVisible(false);
       setAllDropsForModal([]);
-      onCoupleSelected(coupleId);
       await selectCouple(coupleId);
+      if (mountedRef.current) {
+        setPartnerSwitching(false);
+      }
       await onCoupleChanged();
     } catch (nextError) {
       console.error('select couple failed', nextError);
+      if (previousCoupleId) {
+        onCoupleSelected(previousCoupleId);
+      }
       await onCoupleChanged();
       Alert.alert(t.partnerSelectError, t.unknownError);
+    } finally {
+      if (mountedRef.current) {
+        setPartnerSwitching(false);
+      }
     }
   };
 
@@ -871,9 +890,10 @@ function MissionContent({
 
         {error ? <InlineMessage text={error} /> : null}
         {shouldShowDisconnectedNotice ? <InlineMessage text={t.disconnectPartnerNotice} /> : null}
-        {!scopedToday && (isTodayScopeStale || !todayDropHasLoaded || todayDropLoading) ? <InlineMessage text={t.loadingMission} /> : null}
 
-        {scopedToday ? (
+        {dropContentLoading ? (
+          <HomeTodayLoading t={t} />
+        ) : scopedToday ? (
           <>
             <View style={styles.missionCard}>
               <Text allowFontScaling={false} style={styles.dropLabel}>
@@ -942,7 +962,9 @@ function MissionContent({
         </View>
 
         <View style={styles.recentList}>
-          {scopedRecentDrops.length === 0 ? (
+          {dropContentLoading ? (
+            <HomeRecentLoading />
+          ) : scopedRecentDrops.length === 0 ? (
             <InlineMessage text={shouldShowDisconnectedNotice ? t.disconnectedHistoryHidden : t.noRecentDrops} />
           ) : (
             visibleRecentDrops.map((drop) => (
@@ -1042,6 +1064,43 @@ function MissionContent({
         />
       </Modal>
     </SafeAreaView>
+  );
+}
+
+function HomeTodayLoading({ t }: { t: Copy }) {
+  return (
+    <>
+      <View style={styles.missionCard}>
+        <Text allowFontScaling={false} style={styles.dropLabel}>{t.todayDrop}</Text>
+        <Text allowFontScaling={false} style={styles.missionTitle}>{t.loadingMission}</Text>
+        <View style={styles.loadingMetaLine} />
+        <View style={styles.photoPair}>
+          <View style={[styles.loadingPhotoSlot, styles.loadingPhotoSlotLeft]} />
+          <View style={[styles.loadingPhotoSlot, styles.loadingPhotoSlotRight]} />
+        </View>
+      </View>
+      <View style={styles.loadingStateLine} />
+      <View style={[styles.primaryButton, styles.disabledButton]}>
+        <ActivityIndicator color="#FFFFFF" />
+      </View>
+    </>
+  );
+}
+
+function HomeRecentLoading() {
+  return (
+    <>
+      {[0, 1].map((index) => (
+        <View key={index} style={styles.recentRow}>
+          <View style={[styles.loadingRecentThumb, { height: RECENT_THUMB_DEFAULT_HEIGHT }]} />
+          <View style={styles.loadingRecentInfo}>
+            <View style={styles.loadingRecentTitle} />
+            <View style={styles.loadingRecentLine} />
+            <View style={styles.loadingRecentMeta} />
+          </View>
+        </View>
+      ))}
+    </>
   );
 }
 
@@ -5096,6 +5155,35 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     width: '100%',
   },
+  loadingMetaLine: {
+    backgroundColor: '#ECE8E1',
+    borderRadius: 4,
+    height: 13,
+    marginBottom: 10,
+    width: '42%',
+  },
+  loadingPhotoSlot: {
+    backgroundColor: '#ECE8E1',
+    flex: 1,
+    height: '100%',
+  },
+  loadingPhotoSlotLeft: {
+    borderBottomLeftRadius: 12,
+    borderTopLeftRadius: 12,
+    marginRight: 1,
+  },
+  loadingPhotoSlotRight: {
+    borderBottomRightRadius: 12,
+    borderTopRightRadius: 12,
+  },
+  loadingStateLine: {
+    alignSelf: 'center',
+    backgroundColor: '#ECE8E1',
+    borderRadius: 4,
+    height: 16,
+    marginVertical: 8,
+    width: '54%',
+  },
   dropSlot: {
     alignItems: 'center',
     flex: 1,
@@ -5360,6 +5448,33 @@ const styles = StyleSheet.create({
   },
   recentList: {
     gap: 10,
+  },
+  loadingRecentThumb: {
+    backgroundColor: '#ECE8E1',
+    marginRight: 14,
+    width: RECENT_THUMB_GROUP_WIDTH,
+  },
+  loadingRecentInfo: {
+    flex: 1,
+    gap: 7,
+  },
+  loadingRecentTitle: {
+    backgroundColor: '#ECE8E1',
+    borderRadius: 4,
+    height: 15,
+    width: '34%',
+  },
+  loadingRecentLine: {
+    backgroundColor: '#ECE8E1',
+    borderRadius: 4,
+    height: 14,
+    width: '72%',
+  },
+  loadingRecentMeta: {
+    backgroundColor: '#ECE8E1',
+    borderRadius: 4,
+    height: 12,
+    width: '45%',
   },
   recentRow: {
     alignItems: 'center',

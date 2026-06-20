@@ -60,6 +60,7 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
       refetchRequestIdRef.current = requestId;
       const nextRefetch = (async () => {
         const requestScopeKey = dropScopeKey;
+        const expectedCoupleId = selectedCoupleId ?? null;
         const refetchTimerLabel = '[photo] home refetch/signed URL regeneration';
         if (isRefresh) {
           setRefreshing(true);
@@ -73,7 +74,10 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
             console.time(refetchTimerLabel);
           }
           const nextToday = await getOrCreateTodayDrop();
-          if (dropScopeKeyRef.current !== requestScopeKey) {
+          if (
+            dropScopeKeyRef.current !== requestScopeKey ||
+            (expectedCoupleId && nextToday.daily_drop.couple_id !== expectedCoupleId)
+          ) {
             return null;
           }
           setToday((current) => (areTodayImageUrlsEqual(current, nextToday) ? current : nextToday));
@@ -85,10 +89,11 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
           if (dropScopeKeyRef.current !== requestScopeKey) {
             return null;
           }
-          setRecentDrops((current) => (areRecentImageUrlsEqual(current, nextRecentDrops) ? current : nextRecentDrops));
-          await prefetchDropImageUrls([...collectTodayImageUrls(nextToday), ...collectRecentImageUrls(nextRecentDrops)], isRefresh ? 0 : IMAGE_PREFETCH_TIMEOUT_MS);
+          const scopedRecentDrops = expectedCoupleId ? nextRecentDrops.filter((drop) => drop.couple_id === expectedCoupleId) : nextRecentDrops;
+          setRecentDrops((current) => (areRecentImageUrlsEqual(current, scopedRecentDrops) ? current : scopedRecentDrops));
+          await prefetchDropImageUrls([...collectTodayImageUrls(nextToday), ...collectRecentImageUrls(scopedRecentDrops)], isRefresh ? 0 : IMAGE_PREFETCH_TIMEOUT_MS);
           return {
-            recentDrops: nextRecentDrops,
+            recentDrops: scopedRecentDrops,
             today: nextToday,
           };
         } catch (nextError) {
@@ -116,7 +121,7 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
       refetchInFlightRef.current = nextRefetch;
       return nextRefetch;
     },
-    [dropScopeKey, enabled]
+    [dropScopeKey, enabled, selectedCoupleId]
   );
 
   const applyLocalSubmission = React.useCallback((submission: DropSubmission) => {
@@ -172,12 +177,16 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
     dropScopeKeyRef.current = dropScopeKey;
     refetchRequestIdRef.current += 1;
     refetchInFlightRef.current = null;
+    if (realtimeRefetchTimerRef.current) {
+      clearTimeout(realtimeRefetchTimerRef.current);
+      realtimeRefetchTimerRef.current = null;
+    }
     setLoading(false);
     setRefreshing(false);
     setToday(null);
     setRecentDrops([]);
     setLoadedOnce(false);
-  }, [dropScopeKey]);
+  }, [dropScopeKey, enabled]);
 
   React.useEffect(() => {
     void refetch();
