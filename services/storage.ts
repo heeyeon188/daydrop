@@ -7,8 +7,8 @@ import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '@/lib/supabase';
 
 export const DROP_PHOTOS_BUCKET = 'daydrop-photos';
-const DISPLAY_MAX_LONG_EDGE = 1600;
-const DISPLAY_JPEG_QUALITY = 0.88;
+const DISPLAY_MAX_LONG_EDGE = 2048;
+const DISPLAY_JPEG_QUALITY = 0.9;
 const THUMBNAIL_MAX_LONG_EDGE = 640;
 const THUMBNAIL_JPEG_QUALITY = 0.84;
 const SIGNED_URL_TTL_SECONDS = 60 * 60;

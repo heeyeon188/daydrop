@@ -2,7 +2,7 @@
   "expo": {
     "name": "daydrop",
     "slug": "daydrop",
-    "version": "1.0.3",
+    "version": "1.0.5",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "daydrop",
@@ -10,7 +10,7 @@
     "ios": {
       "supportsTablet": false,
       "usesAppleSignIn": true,
-      "buildNumber": "29",
+      "buildNumber": "33",
       "infoPlist": {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleLocalizations": [

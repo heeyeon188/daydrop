@@ -17,7 +17,6 @@ type PrefetchImage = {
 
 const HOME_RECENT_DROPS_LIMIT = 5;
 const REALTIME_REFETCH_DEBOUNCE_MS = 1200;
-const IMAGE_PREFETCH_TIMEOUT_MS = 1200;
 const prefetchedImageKeys = new Set<string>();
 const prefetchingImageKeys = new Set<string>();
 let realtimeChannelInstanceId = 0;
@@ -25,12 +24,14 @@ let realtimeChannelInstanceId = 0;
 export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null, currentUserId?: string | null) {
   const [today, setToday] = React.useState<TodayDropPayload | null>(null);
   const [recentDrops, setRecentDrops] = React.useState<RecentDrop[]>([]);
-  const [loading, setLoading] = React.useState(false);
+  const [todayLoading, setTodayLoading] = React.useState(false);
+  const [recentLoading, setRecentLoading] = React.useState(false);
   const [refreshing, setRefreshing] = React.useState(false);
-  const [loadedOnce, setLoadedOnce] = React.useState(false);
+  const [todayLoadedOnce, setTodayLoadedOnce] = React.useState(false);
+  const [recentLoadedOnce, setRecentLoadedOnce] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const dropScopeKey = selectedCoupleId ?? 'solo';
-  const hasLoaded = !enabled || loadedOnce;
+  const hasLoaded = !enabled || todayLoadedOnce;
   const dropScopeKeyRef = React.useRef(dropScopeKey);
   const refetchInFlightRef = React.useRef<Promise<RefetchResult> | null>(null);
   const refetchRequestIdRef = React.useRef(0);
@@ -52,7 +53,8 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
       if (!enabled) {
         setToday(null);
         setRecentDrops([]);
-        setLoadedOnce(false);
+        setTodayLoadedOnce(false);
+        setRecentLoadedOnce(false);
         return null;
       }
 
@@ -65,7 +67,8 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
         if (isRefresh) {
           setRefreshing(true);
         } else {
-          setLoading(true);
+          setTodayLoading(true);
+          setRecentLoading(true);
         }
         setError(null);
 
@@ -81,21 +84,41 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
             return null;
           }
           setToday((current) => (areTodayImageUrlsEqual(current, nextToday) ? current : nextToday));
+          setTodayLoadedOnce(true);
+          setTodayLoading(false);
+          prefetchDropImageUrls(collectTodayImageUrls(nextToday));
 
-          const nextRecentDrops = await getRecentDrops(nextToday.daily_drop.couple_id, {
-            signedDropLimit: HOME_RECENT_DROPS_LIMIT,
-            signingMode: 'thumbnail',
-          });
-          if (dropScopeKeyRef.current !== requestScopeKey) {
-            return null;
+          try {
+            const nextRecentDrops = await getRecentDrops(nextToday.daily_drop.couple_id, {
+              signedDropLimit: HOME_RECENT_DROPS_LIMIT,
+              signingMode: 'thumbnail',
+            });
+            if (dropScopeKeyRef.current !== requestScopeKey) {
+              return null;
+            }
+            const scopedRecentDrops = expectedCoupleId ? nextRecentDrops.filter((drop) => drop.couple_id === expectedCoupleId) : nextRecentDrops;
+            setRecentDrops((current) => (areRecentImageUrlsEqual(current, scopedRecentDrops) ? current : scopedRecentDrops));
+            prefetchDropImageUrls(collectRecentImageUrls(scopedRecentDrops));
+            return {
+              recentDrops: scopedRecentDrops,
+              today: nextToday,
+            };
+          } catch (recentError) {
+            if (dropScopeKeyRef.current !== requestScopeKey) {
+              return null;
+            }
+            console.error('load recent drops failed', recentError);
+            setError('ë„¤íŠ¸ì›Œí¬ ìƒíƒœë¥¼ í™•ì¸í•˜ê³  ë‹¤ì‹œ ì‹œë„í•´ì£¼ì„¸ìš”.');
+            return {
+              recentDrops: [],
+              today: nextToday,
+            };
+          } finally {
+            if (dropScopeKeyRef.current === requestScopeKey) {
+              setRecentLoadedOnce(true);
+              setRecentLoading(false);
+            }
           }
-          const scopedRecentDrops = expectedCoupleId ? nextRecentDrops.filter((drop) => drop.couple_id === expectedCoupleId) : nextRecentDrops;
-          setRecentDrops((current) => (areRecentImageUrlsEqual(current, scopedRecentDrops) ? current : scopedRecentDrops));
-          await prefetchDropImageUrls([...collectTodayImageUrls(nextToday), ...collectRecentImageUrls(scopedRecentDrops)], isRefresh ? 0 : IMAGE_PREFETCH_TIMEOUT_MS);
-          return {
-            recentDrops: scopedRecentDrops,
-            today: nextToday,
-          };
         } catch (nextError) {
           if (dropScopeKeyRef.current !== requestScopeKey) {
             return null;
@@ -108,10 +131,12 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
             console.timeEnd(refetchTimerLabel);
           }
           if (dropScopeKeyRef.current === requestScopeKey) {
-            setLoadedOnce(true);
+            setTodayLoadedOnce(true);
+            setRecentLoadedOnce(true);
+            setTodayLoading(false);
+            setRecentLoading(false);
           }
           if (refetchRequestIdRef.current === requestId) {
-            setLoading(false);
             setRefreshing(false);
             refetchInFlightRef.current = null;
           }
@@ -130,12 +155,14 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
         return current;
       }
 
+      const currentSubmission = current.submissions.find((nextSubmission) => nextSubmission.user_id === submission.user_id);
+      const nextSubmission = keepLocalPreviewUntilOptimizedImage(currentSubmission, submission);
       const withoutMine = current.submissions.filter((nextSubmission) => nextSubmission.user_id !== submission.user_id);
       const nextToday = {
         ...current,
-        submissions: [...withoutMine, submission],
+        submissions: [...withoutMine, nextSubmission],
       };
-      void prefetchDropImageUrls(collectTodayImageUrls(nextToday), 0);
+      prefetchDropImageUrls(collectTodayImageUrls(nextToday));
       return nextToday;
     });
   }, []);
@@ -181,11 +208,13 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
       clearTimeout(realtimeRefetchTimerRef.current);
       realtimeRefetchTimerRef.current = null;
     }
-    setLoading(false);
+    setTodayLoading(false);
+    setRecentLoading(false);
     setRefreshing(false);
     setToday(null);
     setRecentDrops([]);
-    setLoadedOnce(false);
+    setTodayLoadedOnce(false);
+    setRecentLoadedOnce(false);
   }, [dropScopeKey, enabled]);
 
   React.useEffect(() => {
@@ -235,7 +264,9 @@ export function useTodayDrop(enabled: boolean, selectedCoupleId?: string | null,
     today,
     recentDrops,
     hasLoaded,
-    loading,
+    loading: todayLoading,
+    recentHasLoaded: !enabled || recentLoadedOnce,
+    recentLoading,
     refreshing,
     error,
     applyLocalSubmission,
@@ -270,7 +301,7 @@ function getSubmissionDisplayImage(submission: DropSubmission) {
 }
 
 function getSubmissionThumbnailImage(submission: DropSubmission) {
-  return getNonEmptyString(submission.thumbnail_image_url) || getNonEmptyString(submission.image_url);
+  return getNonEmptyString(submission.thumbnail_image_url) || getNonEmptyString(submission.display_image_url) || getNonEmptyString(submission.image_url);
 }
 
 function getSubmissionImageCacheKey(submission: DropSubmission, usage: 'display' | 'thumbnail', fallbackUrl: string) {
@@ -281,7 +312,7 @@ function getSubmissionImageCacheKey(submission: DropSubmission, usage: 'display'
   return submission.display_storage_path?.trim() || submission.storage_path?.trim() || fallbackUrl;
 }
 
-async function prefetchDropImageUrls(images: PrefetchImage[], timeoutMs: number) {
+function prefetchDropImageUrls(images: PrefetchImage[]) {
   const imageByKey = new Map(images.map((image) => [image.key, image.url]));
   const nextImages = [...imageByKey.entries()].filter(([key]) => !prefetchedImageKeys.has(key) && !prefetchingImageKeys.has(key));
   if (nextImages.length === 0) {
@@ -290,7 +321,7 @@ async function prefetchDropImageUrls(images: PrefetchImage[], timeoutMs: number)
 
   nextImages.forEach(([key]) => prefetchingImageKeys.add(key));
 
-  const prefetch = ExpoImage.prefetch(
+  void ExpoImage.prefetch(
     nextImages.map(([, url]) => url),
     'memory-disk'
   )
@@ -305,13 +336,6 @@ async function prefetchDropImageUrls(images: PrefetchImage[], timeoutMs: number)
     .finally(() => {
       nextImages.forEach(([key]) => prefetchingImageKeys.delete(key));
     });
-
-  if (timeoutMs <= 0) {
-    void prefetch;
-    return;
-  }
-
-  await Promise.race([prefetch, wait(timeoutMs)]);
 }
 
 function areTodayImageUrlsEqual(current: TodayDropPayload | null, next: TodayDropPayload) {
@@ -345,7 +369,8 @@ function areSubmissionImageUrlsEqual(current: DropSubmission[], next: DropSubmis
       submission.display_image_url === next[index]?.display_image_url &&
       submission.display_storage_path === next[index]?.display_storage_path &&
       submission.thumbnail_image_url === next[index]?.thumbnail_image_url &&
-      submission.thumbnail_storage_path === next[index]?.thumbnail_storage_path
+      submission.thumbnail_storage_path === next[index]?.thumbnail_storage_path &&
+      submission.note === next[index]?.note
   );
 }
 
@@ -353,8 +378,21 @@ function getNonEmptyString(value: string | null | undefined) {
   return value?.trim() || undefined;
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function keepLocalPreviewUntilOptimizedImage(current: DropSubmission | undefined, next: DropSubmission) {
+  const currentDisplayPath = current?.display_storage_path?.trim();
+  const nextHasOptimizedImage = Boolean(next.display_storage_path?.trim() || next.thumbnail_storage_path?.trim());
+  if (!current || !currentDisplayPath?.startsWith('local://') || nextHasOptimizedImage) {
+    return next;
+  }
+
+  return {
+    ...next,
+    display_image_url: current.display_image_url ?? next.display_image_url,
+    display_storage_path: current.display_storage_path,
+    image_url: current.image_url,
+    thumbnail_image_url: current.thumbnail_image_url,
+    thumbnail_storage_path: current.thumbnail_storage_path,
+  };
 }
 
 function getRealtimePayloadUserId(payload: { new?: unknown; old?: unknown }) {

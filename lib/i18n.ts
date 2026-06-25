@@ -104,6 +104,7 @@ type TranslationKey =
   | 'profileSaveError'
   | 'profileSaved'
   | 'recentDrops'
+  | 'recentDropsDisplayLimit'
   | 'reportIssue'
   | 'reportIssueBody'
   | 'save'
@@ -234,6 +235,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     profileSaveError: '프로필 저장 실패',
     profileSaved: '프로필이 저장되었어요.',
     recentDrops: 'Recent Drops',
+    recentDropsDisplayLimit: '최근 사진은 최대 15개까지 표시돼요.',
     reportIssue: '문제 신고',
     reportIssueBody: '불쾌한 사진, 메시지, 파트너 연결 문제를 신고하세요.',
     save: '저장',
@@ -363,6 +365,7 @@ const translations: Record<Language, Record<TranslationKey, string>> = {
     profileSaveError: 'Could not save profile',
     profileSaved: 'Profile saved.',
     recentDrops: 'Recent Drops',
+    recentDropsDisplayLimit: 'Recent drops show up to 15 photos.',
     reportIssue: 'Report an Issue',
     reportIssueBody: 'Report uncomfortable photos, message issues, or partner connection problems.',
     save: 'Save',

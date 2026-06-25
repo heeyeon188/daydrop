@@ -64,7 +64,10 @@ import { createPhotoSignedUrl, normalizeCameraPhoto, type CameraFacing, type Day
 import type { AuthUser, Couple, CoupleMember, DropState, DropSubmission, PartnerType, Profile, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
 const EMPTY_MEMBERS: CoupleMember[] = [];
+const CAPTION_TIP_STORAGE_KEY = 'daydrop.hasSeenCaptionTip';
+const CAPTION_TIP_AUTO_DISMISS_MS = 4000;
 const PERMISSION_INTRO_STORAGE_KEY = 'daydrop.hasSeenPermissionIntro';
+const PREFERRED_LANGUAGE_STORAGE_KEY = 'daydrop.preferredLanguage';
 const DEFAULT_PHOTO_PAIR_HEIGHT = 292;
 const STORY_TEMPLATE_BASE_WIDTH = 360;
 const STORY_TEMPLATE_BASE_HEIGHT = 640;
@@ -78,6 +81,7 @@ const LOCKED_THUMBNAIL_PHOTO_BLUR_RADIUS = 340;
 const HOME_IMAGE_TRANSITION_MS = 180;
 const TODAY_DROP_PENDING_TEXT_COLOR = '#666666';
 const TODAY_DROP_PENDING_ICON_COLOR = '#7890AE';
+const PROFILE_PLACEHOLDER_COLOR = '#737373';
 const INVITE_LINK_SAVE_DEDUPE_MS = 3000;
 const inviteCodesInFlight = new Set<string>();
 const handledInviteCodes = new Set<string>();
@@ -90,21 +94,20 @@ const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
 
 type Copy = ReturnType<typeof getTranslations>;
 type FeatherIconName = React.ComponentProps<typeof Feather>['name'];
-type FullImage = { canDelete?: boolean; image?: string; label: string; mission: string };
+type CachedImageSource = { cacheKey?: string; uri: string };
+type FullImage = { canDelete?: boolean; caption?: string; image?: CachedImageSource; label: string; mission: string };
 type DropDetail = { drop: RecentDrop; state: DropState };
 type ImageSize = { height: number; width: number };
 type SharePhotoPair = { leftUri: string; rightUri: string };
 type ShareStoryData = SharePhotoPair & {
   date: string;
+  leftDisplayStoragePath?: string | null;
   leftLocation: string;
   leftName: string;
-  leftOriginalStoragePath?: string | null;
-  leftOriginalUri: string;
   mission: string;
+  rightDisplayStoragePath?: string | null;
   rightLocation: string;
   rightName: string;
-  rightOriginalStoragePath?: string | null;
-  rightOriginalUri: string;
 };
 type PhotoPreviewLayout = SharePhotoPair & {
   height: number;
@@ -277,8 +280,40 @@ export default function MissionScreen() {
   const profileState = useProfile(user?.id);
   const myCouple = useMyCouple(Boolean(user));
   const language = getPreferredOrDeviceLanguage(profileState.profile?.preferred_language);
+  const [cachedPreferredLanguage, setCachedPreferredLanguage] = React.useState<Language | null>(null);
   const [pendingInviteCode, setPendingInviteCode] = React.useState<string | null>(null);
   const lastSavedInviteCodeRef = React.useRef<{ code: string; savedAt: number } | null>(null);
+  const loadingLanguage = profileState.profile?.preferred_language ?? cachedPreferredLanguage ?? undefined;
+
+  React.useEffect(() => {
+    let mounted = true;
+
+    AsyncStorage.getItem(PREFERRED_LANGUAGE_STORAGE_KEY)
+      .then((storedLanguage) => {
+        if (mounted && (storedLanguage === 'ko' || storedLanguage === 'en')) {
+          setCachedPreferredLanguage(storedLanguage);
+        }
+      })
+      .catch((error) => {
+        console.warn('preferred language cache load failed', error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const preferredLanguage = profileState.profile?.preferred_language;
+    if (preferredLanguage !== 'ko' && preferredLanguage !== 'en') {
+      return;
+    }
+
+    setCachedPreferredLanguage(preferredLanguage);
+    AsyncStorage.setItem(PREFERRED_LANGUAGE_STORAGE_KEY, preferredLanguage).catch((error) => {
+      console.warn('preferred language cache save failed', error);
+    });
+  }, [profileState.profile?.preferred_language]);
 
   React.useEffect(() => {
     let mounted = true;
@@ -329,7 +364,7 @@ export default function MissionScreen() {
   }, []);
 
   if (sessionLoading) {
-    return <AppLoadingScreen language={language} />;
+    return <AppLoadingScreen language={loadingLanguage} />;
   }
 
   if (configError) {
@@ -341,7 +376,7 @@ export default function MissionScreen() {
   }
 
   if (!profileState.hasLoaded) {
-    return <AppLoadingScreen language={language} />;
+    return <AppLoadingScreen language={loadingLanguage} />;
   }
 
   if (!myCouple.hasLoaded) {
@@ -413,7 +448,19 @@ function MissionContent({
 }) {
   const t = getTranslations(language);
   const [partnerSwitching, setPartnerSwitching] = React.useState(false);
-  const { today, recentDrops, hasLoaded: todayDropHasLoaded, loading: todayDropLoading, refreshing, error, applyLocalSubmission, removeLocalSubmission, refetch } = useTodayDrop(!partnerSwitching, myCouple?.couple.id, myUserId);
+  const {
+    today,
+    recentDrops,
+    hasLoaded: todayDropHasLoaded,
+    loading: todayDropLoading,
+    recentHasLoaded,
+    recentLoading,
+    refreshing,
+    error,
+    applyLocalSubmission,
+    removeLocalSubmission,
+    refetch,
+  } = useTodayDrop(!partnerSwitching, myCouple?.couple.id, myUserId);
   const [deletingPhoto, setDeletingPhoto] = React.useState(false);
   const [uploading, setUploading] = React.useState(false);
   const [fullImage, setFullImage] = React.useState<FullImage | null>(null);
@@ -460,23 +507,21 @@ function MissionContent({
     const { mine, partner } = splitSubmissions(scopedToday.submissions, myUserId);
     const mineDisplayImage = getSubmissionDisplayImage(mine);
     const partnerDisplayImage = getSubmissionDisplayImage(partner);
-    if (!mineDisplayImage || !partnerDisplayImage || !mine?.image_url || !partner?.image_url) {
+    if (!mineDisplayImage || !partnerDisplayImage) {
       return null;
     }
 
     return {
       date: formatStoryDate(scopedToday.daily_drop.drop_date),
+      leftDisplayStoragePath: partner?.display_storage_path,
       leftLocation: formatLocation(members.partner, language, t.cityFallbackPartner),
       leftName: displayMemberName(members.partner, t.partner),
-      leftOriginalStoragePath: partner.storage_path,
-      leftOriginalUri: partner.image_url,
-      leftUri: partnerDisplayImage,
+      leftUri: partnerDisplayImage.uri,
       mission: getMissionPrompt(scopedToday.mission, language),
+      rightDisplayStoragePath: mine?.display_storage_path,
       rightLocation: formatLocation(members.me, language, t.cityFallbackMe),
       rightName: displayMemberName(members.me, t.me),
-      rightOriginalStoragePath: mine.storage_path,
-      rightOriginalUri: mine.image_url,
-      rightUri: mineDisplayImage,
+      rightUri: mineDisplayImage.uri,
     };
   }, [language, members.me, members.partner, myUserId, scopedToday, state, t.cityFallbackMe, t.cityFallbackPartner, t.me, t.partner]);
   const hasPartner = Boolean(scopedToday?.couple.status === 'active' && members.partner);
@@ -485,7 +530,8 @@ function MissionContent({
     !currentCoupleId &&
     latestDisconnectedCouple?.status === 'disconnected' &&
     (partnerDisconnectedNoticeVisible || Boolean(latestDisconnectedCouple));
-  const dropContentLoading = partnerSwitching || isTodayScopeStale || !todayDropHasLoaded || todayDropLoading;
+  const todayContentLoading = partnerSwitching || isTodayScopeStale || !todayDropHasLoaded || todayDropLoading;
+  const recentContentLoading = partnerSwitching || isTodayScopeStale || !recentHasLoaded || recentLoading;
   const isTodayUnlocked = hasPartner && state === 'both';
   const mainButtonDisabled = hasPartner ? (state === 'meOnly' || uploading || deletingPhoto) : uploading || deletingPhoto;
   const stateCopy = React.useMemo(() => getStateCopy(state, t, hasPartner), [hasPartner, state, t]);
@@ -531,9 +577,17 @@ function MissionContent({
   }, [allDropsVisible, scopedRecentDrops]);
 
   const openDropDetail = React.useCallback(
-    async (drop: RecentDrop) => {
-      const signedDrop = await signRecentDropForDisplay(drop);
-      setDropDetail({ drop: signedDrop, state: getRecentDropState(signedDrop, myUserId) });
+    (drop: RecentDrop) => {
+      setDropDetail({ drop, state: getRecentDropState(drop, myUserId) });
+      signRecentDropForDisplay(drop)
+        .then((signedDrop) => {
+          setDropDetail((current) =>
+            current?.drop.id === drop.id ? { drop: signedDrop, state: getRecentDropState(signedDrop, myUserId) } : current
+          );
+        })
+        .catch((nextError) => {
+          console.warn('[photo] detail display signing failed; using existing image fallback', nextError);
+        });
     },
     [myUserId]
   );
@@ -668,7 +722,7 @@ function MissionContent({
     }
   };
 
-  const submitPhotoAsset = async (asset: DaydropPhotoAsset, source: CameraFacing) => {
+  const submitPhotoAsset = async (asset: DaydropPhotoAsset, source: CameraFacing, caption: string | null) => {
     const alreadySubmitted = state === 'both' || (hasPartner && state === 'meOnly');
     if (!scopedToday || alreadySubmitted || uploading || deletingPhoto) {
       return;
@@ -691,6 +745,7 @@ function MissionContent({
       }
       localSubmission = createLocalPhotoSubmission({
         asset,
+        caption,
         coupleId,
         dropId: scopedToday.daily_drop.id,
         userId: myUserId,
@@ -712,6 +767,7 @@ function MissionContent({
 
       const submission = await submitDropPhoto({
         base64: picked.base64,
+        caption,
         coupleId,
         dropId: scopedToday.daily_drop.id,
         fileInfo: {
@@ -891,7 +947,7 @@ function MissionContent({
         {error ? <InlineMessage text={error} /> : null}
         {shouldShowDisconnectedNotice ? <InlineMessage text={t.disconnectPartnerNotice} /> : null}
 
-        {dropContentLoading ? (
+        {todayContentLoading ? (
           <HomeTodayLoading t={t} />
         ) : scopedToday ? (
           <>
@@ -920,6 +976,7 @@ function MissionContent({
                   today={scopedToday}
                 />
               </View>
+              <TodayDropCaptionRow hasPartner={hasPartner} myUserId={myUserId} state={state} today={scopedToday} />
             </View>
 
             <Text allowFontScaling={false} style={styles.stateMessage}>
@@ -962,7 +1019,7 @@ function MissionContent({
         </View>
 
         <View style={styles.recentList}>
-          {dropContentLoading ? (
+          {recentContentLoading ? (
             <HomeRecentLoading />
           ) : scopedRecentDrops.length === 0 ? (
             <InlineMessage text={shouldShowDisconnectedNotice ? t.disconnectedHistoryHidden : t.noRecentDrops} />
@@ -1130,7 +1187,7 @@ function DaydropCameraModal({
   language: Language;
   mission: string;
   onClose: () => void;
-  onUsePhoto: (asset: DaydropPhotoAsset, source: CameraFacing) => Promise<void>;
+  onUsePhoto: (asset: DaydropPhotoAsset, source: CameraFacing, caption: string | null) => Promise<void>;
   submitting: boolean;
   visible: boolean;
 }) {
@@ -1138,6 +1195,10 @@ function DaydropCameraModal({
   const [facing, setFacing] = React.useState<CameraType>('back');
   const [flash, setFlash] = React.useState<'off' | 'on'>('off');
   const [captured, setCaptured] = React.useState<(DaydropPhotoAsset & { didFlip?: boolean; mirrorMode?: string; source: CameraFacing }) | null>(null);
+  const [caption, setCaption] = React.useState('');
+  const [captionEditorVisible, setCaptionEditorVisible] = React.useState(false);
+  const [captionTipAvailable, setCaptionTipAvailable] = React.useState<boolean | null>(null);
+  const [captionTipVisible, setCaptionTipVisible] = React.useState(false);
   const [cameraReady, setCameraReady] = React.useState(false);
   const [capturing, setCapturing] = React.useState(false);
   const [defaultBackLens, setDefaultBackLens] = React.useState(IOS_BACK_WIDE_LENS);
@@ -1157,6 +1218,9 @@ function DaydropCameraModal({
   React.useEffect(() => {
     if (!visible) {
       setCaptured(null);
+      setCaption('');
+      setCaptionEditorVisible(false);
+      setCaptionTipVisible(false);
       setCapturing(false);
       setCameraReady(false);
       setFlash('off');
@@ -1166,6 +1230,57 @@ function DaydropCameraModal({
       setPreviewLayout(null);
     }
   }, [visible]);
+
+  React.useEffect(() => {
+    if (!visible || captionTipAvailable !== null) {
+      return;
+    }
+
+    let mounted = true;
+
+    AsyncStorage.getItem(CAPTION_TIP_STORAGE_KEY)
+      .then((storedValue) => {
+        if (mounted) {
+          setCaptionTipAvailable(storedValue !== 'true');
+        }
+      })
+      .catch((error) => {
+        console.warn('caption tip flag load failed', error);
+        if (mounted) {
+          setCaptionTipAvailable(false);
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [captionTipAvailable, visible]);
+
+  React.useEffect(() => {
+    if (!captured || captionTipAvailable !== true) {
+      return;
+    }
+
+    setCaptionTipAvailable(false);
+    setCaptionTipVisible(true);
+    AsyncStorage.setItem(CAPTION_TIP_STORAGE_KEY, 'true').catch((error) => {
+      console.warn('caption tip flag save failed', error);
+    });
+  }, [captionTipAvailable, captured]);
+
+  React.useEffect(() => {
+    if (!captionTipVisible) {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setCaptionTipVisible(false);
+    }, CAPTION_TIP_AUTO_DISMISS_MS);
+
+    return () => {
+      clearTimeout(timeout);
+    };
+  }, [captionTipVisible]);
 
   React.useEffect(() => {
     if (!visible || captured) {
@@ -1337,7 +1452,19 @@ function DaydropCameraModal({
         uri: captured.uri,
         width: captured.width,
       },
-      captured.source
+      captured.source,
+      getNonEmptyString(caption) ?? null
+    );
+  };
+
+  const updateCaption = (value: string) => {
+    setCaption(
+      value
+        .replace(/\r\n?/g, '\n')
+        .split('\n')
+        .slice(0, 2)
+        .join('\n')
+        .slice(0, 60)
     );
   };
 
@@ -1406,7 +1533,38 @@ function DaydropCameraModal({
               {topMission}
             </Text>
           </View>
-          <View style={styles.cameraIconButton} />
+          {captured ? (
+            <View style={styles.cameraIconButton}>
+              <Pressable
+                hitSlop={10}
+                onPress={() => {
+                  setCaptionTipVisible(false);
+                  setCaptionEditorVisible(true);
+                }}
+                style={styles.cameraCaptionButton}>
+                <Text allowFontScaling={false} numberOfLines={1} style={styles.cameraCaptionButtonText}>
+                  {language === 'ko' ? '캡션 +' : 'Caption +'}
+                </Text>
+              </Pressable>
+              {captionTipVisible ? (
+                <View style={styles.cameraCaptionTip}>
+                  <View style={styles.cameraCaptionTipArrow} />
+                  <Text allowFontScaling={false} style={styles.cameraCaptionTipText}>
+                    {language === 'ko' ? '캡션 + 로 한마디를 남겨보세요.' : 'Add a short note with Caption +.'}
+                  </Text>
+                  <Pressable
+                    accessibilityLabel={language === 'ko' ? '안내 닫기' : 'Dismiss tip'}
+                    hitSlop={8}
+                    onPress={() => setCaptionTipVisible(false)}
+                    style={styles.cameraCaptionTipClose}>
+                    <Feather name="x" size={14} color="#555555" strokeWidth={2.2} />
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
+          ) : (
+            <View style={styles.cameraIconButton} />
+          )}
         </View>
 
         {!permission ? (
@@ -1497,6 +1655,9 @@ function DaydropCameraModal({
                   onPress={() => {
                     setCameraReady(false);
                     setCaptured(null);
+                    setCaption('');
+                    setCaptionEditorVisible(false);
+                    setCaptionTipVisible(false);
                   }}
                   style={styles.cameraTextButton}>
                   <Text allowFontScaling={false} style={styles.cameraTextButtonLabel}>
@@ -1531,6 +1692,37 @@ function DaydropCameraModal({
             )}
           </>
         )}
+        <Modal animationType="fade" transparent visible={captionEditorVisible} onRequestClose={() => setCaptionEditorVisible(false)}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.captionModalBackdrop}>
+            <Pressable style={StyleSheet.absoluteFill} onPress={() => setCaptionEditorVisible(false)} />
+            <View style={styles.captionModalCard}>
+              <Text allowFontScaling={false} style={styles.captionModalTitle}>
+                {language === 'ko' ? '캡션 추가' : 'Add caption'}
+              </Text>
+              <TextInput
+                autoFocus
+                maxLength={60}
+                multiline
+                onChangeText={updateCaption}
+                placeholder={language === 'ko' ? '오늘의 사진에 한마디를 남겨보세요' : 'Add a note about today'}
+                placeholderTextColor="#999999"
+                style={styles.captionInput}
+                textAlignVertical="top"
+                value={caption}
+              />
+              <View style={styles.captionModalFooter}>
+                <Text allowFontScaling={false} style={styles.captionCount}>
+                  {caption.length}/60
+                </Text>
+                <Pressable onPress={() => setCaptionEditorVisible(false)} style={styles.captionDoneButton}>
+                  <Text allowFontScaling={false} style={styles.captionDoneButtonText}>
+                    {language === 'ko' ? '완료' : 'Done'}
+                  </Text>
+                </Pressable>
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
       </SafeAreaView>
     </Modal>
   );
@@ -1682,8 +1874,10 @@ function TodayDropPair({
   const myLabel = displayMemberName(members.me, t.me);
   const partnerLabel = displayMemberName(members.partner, t.partner);
   const mission = getMissionPrompt(today.mission, language);
-  const mineDisplayImage = getSubmissionDisplayImage(mine);
-  const partnerDisplayImage = getSubmissionDisplayImage(partner);
+  const mineDisplayImage = getSubmissionTodayImage(mine);
+  const partnerDisplayImage = getSubmissionTodayImage(partner);
+  const mineCaption = getSubmissionCaption(mine);
+  const partnerCaption = getSubmissionCaption(partner);
 
   if (!hasPartner) {
     return (
@@ -1694,7 +1888,7 @@ function TodayDropPair({
             deleting={deletingPhoto}
             image={mineDisplayImage}
             label={myLabel}
-            onOpenImage={() => onOpenImage({ canDelete: true, image: mineDisplayImage, label: myLabel, mission })}
+            onOpenImage={() => onOpenImage({ canDelete: true, caption: mineCaption, image: mineDisplayImage, label: myLabel, mission })}
             side="right"
           />
         ) : (
@@ -1711,13 +1905,13 @@ function TodayDropPair({
           image={partnerDisplayImage}
           label={partnerLabel}
           side="left"
-          onPress={() => onOpenImage({ canDelete: false, image: partnerDisplayImage, label: partnerLabel, mission })}
+          onPress={() => onOpenImage({ canDelete: false, caption: partnerCaption, image: partnerDisplayImage, label: partnerLabel, mission })}
         />
         <EditablePhotoSlot
           deleting={deletingPhoto}
           image={mineDisplayImage}
           label={myLabel}
-          onOpenImage={() => onOpenImage({ canDelete: true, image: mineDisplayImage, label: myLabel, mission })}
+          onOpenImage={() => onOpenImage({ canDelete: true, caption: mineCaption, image: mineDisplayImage, label: myLabel, mission })}
           side="right"
         />
       </>
@@ -1732,7 +1926,7 @@ function TodayDropPair({
           deleting={deletingPhoto}
           image={mineDisplayImage}
           label={myLabel}
-          onOpenImage={() => onOpenImage({ canDelete: true, image: mineDisplayImage, label: myLabel, mission })}
+          onOpenImage={() => onOpenImage({ canDelete: true, caption: mineCaption, image: mineDisplayImage, label: myLabel, mission })}
           side="right"
         />
       </>
@@ -1756,6 +1950,45 @@ function TodayDropPair({
   );
 }
 
+function TodayDropCaptionRow({
+  hasPartner,
+  myUserId,
+  state,
+  today,
+}: {
+  hasPartner: boolean;
+  myUserId: string;
+  state: DropState;
+  today: TodayDropPayload;
+}) {
+  const { mine, partner } = React.useMemo(() => splitSubmissions(today.submissions, myUserId), [myUserId, today.submissions]);
+  const mineCaption = getSubmissionCaption(mine);
+  const partnerCaption = hasPartner && state === 'both' ? getSubmissionCaption(partner) : undefined;
+
+  if (!mineCaption && !partnerCaption) {
+    return null;
+  }
+
+  return (
+    <View style={styles.todayCaptionRow}>
+      <View style={styles.todayCaptionCell}>
+        {partnerCaption ? (
+          <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={2} style={styles.todayCaptionText}>
+            {partnerCaption}
+          </Text>
+        ) : null}
+      </View>
+      <View style={styles.todayCaptionCell}>
+        {mineCaption ? (
+          <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={2} style={styles.todayCaptionText}>
+            {mineCaption}
+          </Text>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
 function getDropState(today: TodayDropPayload | null, myUserId: string): DropState {
   return getSubmissionState(today?.submissions ?? [], myUserId);
 }
@@ -1773,12 +2006,51 @@ function getSubmissionState(submissions: DropSubmission[], myUserId: string): Dr
   return 'none';
 }
 
+function getSubmissionTodayImage(submission: DropSubmission | null | undefined) {
+  return getSubmissionImageSource(submission, 'display');
+}
+
 function getSubmissionDisplayImage(submission: DropSubmission | null | undefined) {
-  return getNonEmptyString(submission?.display_image_url) || getNonEmptyString(submission?.thumbnail_image_url) || getNonEmptyString(submission?.image_url);
+  return getSubmissionImageSource(submission, 'display');
 }
 
 function getSubmissionThumbnailImage(submission: DropSubmission | null | undefined) {
-  return getNonEmptyString(submission?.thumbnail_image_url) || getNonEmptyString(submission?.image_url);
+  return getSubmissionImageSource(submission, 'thumbnail');
+}
+
+function getSubmissionImageSource(submission: DropSubmission | null | undefined, usage: 'display' | 'thumbnail') {
+  if (!submission) {
+    return undefined;
+  }
+
+  const candidates =
+    usage === 'thumbnail'
+      ? [
+          [submission.thumbnail_image_url, submission.thumbnail_storage_path],
+          [submission.display_image_url, submission.display_storage_path],
+          [submission.image_url, submission.storage_path],
+        ]
+      : [
+          [submission.display_image_url, submission.display_storage_path],
+          [submission.thumbnail_image_url, submission.thumbnail_storage_path],
+          [submission.image_url, submission.storage_path],
+        ];
+
+  for (const [url, storagePath] of candidates) {
+    const uri = getNonEmptyString(url);
+    if (!uri) {
+      continue;
+    }
+
+    const cacheKey = getNonEmptyString(storagePath);
+    return cacheKey ? { cacheKey, uri } : { uri };
+  }
+
+  return undefined;
+}
+
+function getSubmissionCaption(submission: DropSubmission | null | undefined) {
+  return getNonEmptyString(submission?.note);
 }
 
 function getNonEmptyString(value: string | null | undefined) {
@@ -1787,11 +2059,13 @@ function getNonEmptyString(value: string | null | undefined) {
 
 function createLocalPhotoSubmission({
   asset,
+  caption,
   coupleId,
   dropId,
   userId,
 }: {
   asset: DaydropPhotoAsset;
+  caption: string | null;
   coupleId: string;
   dropId: string;
   userId: string;
@@ -1810,7 +2084,7 @@ function createLocalPhotoSubmission({
     storage_path: localPath,
     thumbnail_image_url: asset.uri,
     thumbnail_storage_path: localPath,
-    note: null,
+    note: getNonEmptyString(caption) ?? null,
     submitted_at: submittedAt,
   };
 }
@@ -1905,7 +2179,7 @@ function WaitingSlot({ label, t }: { label: string; t: Copy }) {
   );
 }
 
-function PhotoSlot({ image, label, onPress, side }: { image?: string; label: string; onPress: () => void; side: 'left' | 'right' }) {
+function PhotoSlot({ image, label, onPress, side }: { image?: CachedImageSource; label: string; onPress: () => void; side: 'left' | 'right' }) {
   return (
     <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius(side)]}>
       <SafeImage image={image} label={label} resizeMode="cover" />
@@ -1924,7 +2198,7 @@ function EditablePhotoSlot({
   side,
 }: {
   deleting: boolean;
-  image?: string;
+  image?: CachedImageSource;
   label: string;
   onOpenImage: () => void;
   side: 'left' | 'right';
@@ -1939,7 +2213,7 @@ function EditablePhotoSlot({
   );
 }
 
-function LockedPhotoSlot({ image, label, onPress, t }: { image?: string; label: string; onPress: () => void; t: Copy }) {
+function LockedPhotoSlot({ image, label, onPress, t }: { image?: CachedImageSource; label: string; onPress: () => void; t: Copy }) {
   return (
     <Pressable onPress={onPress} style={[styles.dropSlot, styles.imageSlot, sideRadius('left')]}>
       <SafeImage blurRadius={LOCKED_PHOTO_BLUR_RADIUS} image={image} label={label} resizeMode="cover" />
@@ -1972,14 +2246,24 @@ function SendSlot({ label, onPress, t }: { label: string; onPress: () => void; t
   );
 }
 
-function SafeImage({ blurRadius = 0, image, label, resizeMode = 'contain' }: { blurRadius?: number; image?: string; label: string; resizeMode?: SafeImageResizeMode }) {
+function SafeImage({
+  blurRadius = 0,
+  image,
+  label,
+  resizeMode = 'contain',
+}: {
+  blurRadius?: number;
+  image?: CachedImageSource;
+  label: string;
+  resizeMode?: SafeImageResizeMode;
+}) {
   const [failed, setFailed] = React.useState(false);
   const locked = blurRadius > 0;
   const lockedBlurRadius = Math.max(blurRadius, LOCKED_PHOTO_BLUR_RADIUS);
 
   React.useEffect(() => {
     setFailed(false);
-  }, [image]);
+  }, [image?.cacheKey, image?.uri]);
 
   if (!image || failed) {
     return (
@@ -2080,7 +2364,17 @@ function RecentDropRow({
   );
 }
 
-function RecentThumb({ height = RECENT_THUMB_DEFAULT_HEIGHT, image, locked, side }: { height?: number; image?: string; locked: boolean; side: 'left' | 'right' }) {
+function RecentThumb({
+  height = RECENT_THUMB_DEFAULT_HEIGHT,
+  image,
+  locked,
+  side,
+}: {
+  height?: number;
+  image?: CachedImageSource;
+  locked: boolean;
+  side: 'left' | 'right';
+}) {
   return (
     <View style={[styles.recentThumb, side === 'left' ? styles.recentThumbLeft : styles.recentThumbRight, { height }]}>
       {image ? (
@@ -2125,6 +2419,11 @@ function FullImageModal({
           <Text allowFontScaling={false} style={styles.fullLabel}>
             {image?.label}
           </Text>
+          {image?.caption ? (
+            <Text allowFontScaling={false} ellipsizeMode="tail" numberOfLines={2} style={styles.fullPhotoCaption}>
+              {image.caption}
+            </Text>
+          ) : null}
           <Text allowFontScaling={false} style={styles.fullMission}>
             {image?.mission}
           </Text>
@@ -2183,6 +2482,9 @@ function AllDropsModal({
           </Pressable>
         </View>
         <ScrollView contentContainerStyle={styles.allDropsContent}>
+          <Text allowFontScaling={false} style={styles.allDropsDescription}>
+            {t.recentDropsDisplayLimit}
+          </Text>
           {drops.length === 0 ? (
             <InlineMessage text={t.noDrops} />
           ) : (
@@ -2372,9 +2674,9 @@ function TodayShareSheet({
 
     try {
       setPhotoPreviewLoading(true);
-      const originalShareData = await prepareOriginalShareData(shareData);
-      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(originalShareData.leftUri), getRemoteImageSize(originalShareData.rightUri)]);
-      setPhotoPreviewLayout(createPhotoPreviewLayout(originalShareData, leftSize, rightSize, windowDimensions.width, windowDimensions.height, insets));
+      const displayShareData = await prepareDisplayShareData(shareData);
+      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(displayShareData.leftUri), getRemoteImageSize(displayShareData.rightUri)]);
+      setPhotoPreviewLayout(createPhotoPreviewLayout(displayShareData, leftSize, rightSize, windowDimensions.width, windowDimensions.height, insets));
     } catch (nextError) {
       console.error('view today drop photo failed', nextError);
       Alert.alert(t.photoView, nextError instanceof Error && nextError.message === 'photo_read_failed' ? t.photoReadError : t.unknownError);
@@ -2395,9 +2697,9 @@ function TodayShareSheet({
 
     try {
       setSharingStory(true);
-      const originalShareData = await prepareOriginalShareData(shareData);
-      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(originalShareData.leftUri), getRemoteImageSize(originalShareData.rightUri)]);
-      const nextLayout = createShareStoryLayout(originalShareData, leftSize, rightSize, language);
+      const displayShareData = await prepareDisplayShareData(shareData);
+      const [leftSize, rightSize] = await Promise.all([getRemoteImageSize(displayShareData.leftUri), getRemoteImageSize(displayShareData.rightUri)]);
+      const nextLayout = createShareStoryLayout(displayShareData, leftSize, rightSize, language);
       let templateReadyTimeout: ReturnType<typeof setTimeout> | null = null;
       const templateReadyPromise = new Promise<void>((resolve, reject) => {
         storyImageLoadCountRef.current = 0;
@@ -2650,7 +2952,7 @@ function PhotoPreviewModal({ layout, onClose, visible }: { layout: PhotoPreviewL
   );
 }
 
-function DetailPhoto({ image, label, locked, side }: { image?: string; label: string; locked: boolean; side: 'left' | 'right' }) {
+function DetailPhoto({ image, label, locked, side }: { image?: CachedImageSource; label: string; locked: boolean; side: 'left' | 'right' }) {
   return (
     <View style={[styles.detailPhoto, !image && styles.emptyPhotoSlot, !image && styles.detailEmptyPhotoSlot, sideRadius(side)]}>
       {image ? <SafeImage blurRadius={locked ? LOCKED_PHOTO_BLUR_RADIUS : 0} image={image} label={`detail-${label}`} resizeMode="cover" /> : <View style={styles.detailPlaceholder} />}
@@ -3581,10 +3883,10 @@ function loadRemoteImageSize(image: string): Promise<ImageSize> {
   });
 }
 
-async function prepareOriginalShareData(data: ShareStoryData): Promise<ShareStoryData> {
+async function prepareDisplayShareData(data: ShareStoryData): Promise<ShareStoryData> {
   const [leftUri, rightUri] = await Promise.all([
-    getOriginalShareUri(data.leftOriginalUri, data.leftOriginalStoragePath),
-    getOriginalShareUri(data.rightOriginalUri, data.rightOriginalStoragePath),
+    getDisplayShareUri(data.leftUri, data.leftDisplayStoragePath),
+    getDisplayShareUri(data.rightUri, data.rightDisplayStoragePath),
   ]);
 
   return {
@@ -3594,17 +3896,17 @@ async function prepareOriginalShareData(data: ShareStoryData): Promise<ShareStor
   };
 }
 
-async function getOriginalShareUri(originalUri: string, storagePath?: string | null) {
+async function getDisplayShareUri(fallbackUri: string, storagePath?: string | null) {
   const normalizedPath = storagePath?.trim();
   if (!normalizedPath || normalizedPath.startsWith('local://')) {
-    return originalUri;
+    return fallbackUri;
   }
 
   try {
     return await createPhotoSignedUrl(normalizedPath);
   } catch (error) {
-    console.warn('[share] original image signing failed; using existing URL fallback', { storagePath: normalizedPath, error });
-    return originalUri;
+    console.warn('[share] display image signing failed; using existing URL fallback', { storagePath: normalizedPath, error });
+    return fallbackUri;
   }
 }
 
@@ -4095,7 +4397,15 @@ function ProfileForm({
 
   return (
     <View>
-      {!hideDisplayName ? <TextInput onChangeText={setDisplayName} placeholder={formT.name} style={styles.input} value={displayName} /> : null}
+      {!hideDisplayName ? (
+        <TextInput
+          onChangeText={setDisplayName}
+          placeholder={formT.name}
+          placeholderTextColor={PROFILE_PLACEHOLDER_COLOR}
+          style={styles.input}
+          value={displayName}
+        />
+      ) : null}
       <View style={styles.countryPickerWrap}>
         <TextInput
           autoCorrect={false}
@@ -4111,6 +4421,7 @@ function ProfileForm({
           }}
           onFocus={() => setCountryPickerOpen(true)}
           placeholder={formT.searchCountry}
+          placeholderTextColor={PROFILE_PLACEHOLDER_COLOR}
           style={[styles.input, countryPickerOpen && styles.countryInputOpen]}
           value={countryQuery}
         />
@@ -4152,7 +4463,13 @@ function ProfileForm({
           </View>
         ) : null}
       </View>
-      <TextInput onChangeText={setCity} placeholder={formT.city} style={styles.input} value={city} />
+      <TextInput
+        onChangeText={setCity}
+        placeholder={formT.city}
+        placeholderTextColor={PROFILE_PLACEHOLDER_COLOR}
+        style={styles.input}
+        value={city}
+      />
       <View style={styles.languageRow}>
         <Text allowFontScaling={false} style={styles.infoLabel}>
           {formT.language}
@@ -4643,9 +4960,13 @@ function CenteredState({ text }: { text: string }) {
   );
 }
 
-function AppLoadingScreen({ language: preferredLanguage }: { language?: Language }) {
-  const language = getPreferredOrDeviceLanguage(preferredLanguage);
-  const subtitle = language === 'ko' ? '\uC624\uB298\uC744 \uACF5\uC720\uD558\uB294 \uAC00\uC7A5 \uC26C\uC6B4 \uBC29\uBC95' : 'The easiest way to share your day';
+function AppLoadingScreen({ language }: { language?: Language }) {
+  const subtitle =
+    language === 'ko'
+      ? '\uC624\uB298\uC744 \uACF5\uC720\uD558\uB294 \uAC00\uC7A5 \uC26C\uC6B4 \uBC29\uBC95'
+      : language === 'en'
+        ? 'The easiest way to share your day'
+        : null;
 
   return (
     <SafeAreaView style={styles.appLoadingScreen}>
@@ -4654,9 +4975,11 @@ function AppLoadingScreen({ language: preferredLanguage }: { language?: Language
           DAYDROP
         </Text>
         <View style={styles.appLoadingSubtitleWrap}>
-          <Text allowFontScaling={false} numberOfLines={1} style={[styles.appLoadingSubtitle, language === 'ko' ? styles.appLoadingSubtitleKo : styles.appLoadingSubtitleEn]}>
-            {subtitle}
-          </Text>
+          {subtitle ? (
+            <Text allowFontScaling={false} numberOfLines={1} style={[styles.appLoadingSubtitle, language === 'ko' ? styles.appLoadingSubtitleKo : styles.appLoadingSubtitleEn]}>
+              {subtitle}
+            </Text>
+          ) : null}
         </View>
       </View>
     </SafeAreaView>
@@ -4847,12 +5170,67 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 20,
     paddingTop: 14,
+    zIndex: 2,
   },
   cameraIconButton: {
     alignItems: 'center',
     height: 46,
     justifyContent: 'center',
-    width: 46,
+    width: 82,
+  },
+  cameraCaptionButton: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderColor: 'rgba(255,255,255,0.42)',
+    borderRadius: 999,
+    borderWidth: 1,
+    justifyContent: 'center',
+    minHeight: 38,
+    paddingHorizontal: 12,
+    width: 80,
+  },
+  cameraCaptionButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  cameraCaptionTip: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderRadius: 14,
+    elevation: 8,
+    flexDirection: 'row',
+    paddingLeft: 12,
+    paddingRight: 8,
+    paddingVertical: 9,
+    position: 'absolute',
+    right: 0,
+    top: 50,
+    width: 238,
+    zIndex: 3,
+  },
+  cameraCaptionTipArrow: {
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    height: 10,
+    position: 'absolute',
+    right: 28,
+    top: -5,
+    transform: [{ rotate: '45deg' }],
+    width: 10,
+  },
+  cameraCaptionTipText: {
+    color: '#333333',
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 17,
+  },
+  cameraCaptionTipClose: {
+    alignItems: 'center',
+    height: 26,
+    justifyContent: 'center',
+    marginLeft: 4,
+    width: 26,
   },
   cameraTitleWrap: {
     alignItems: 'center',
@@ -4988,6 +5366,61 @@ const styles = StyleSheet.create({
   cameraUseButtonText: {
     color: '#111111',
     fontSize: 16,
+    fontWeight: '800',
+  },
+  captionModalBackdrop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.58)',
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  captionModalCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: 20,
+    width: '100%',
+  },
+  captionModalTitle: {
+    color: '#111111',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 14,
+  },
+  captionInput: {
+    backgroundColor: '#F5F5F5',
+    borderColor: '#E5E5E5',
+    borderRadius: 14,
+    borderWidth: 1,
+    color: '#111111',
+    fontSize: 16,
+    height: 86,
+    lineHeight: 23,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  captionModalFooter: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 14,
+  },
+  captionCount: {
+    color: '#777777',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  captionDoneButton: {
+    alignItems: 'center',
+    backgroundColor: '#111111',
+    borderRadius: 999,
+    justifyContent: 'center',
+    minHeight: 40,
+    paddingHorizontal: 18,
+  },
+  captionDoneButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
     fontWeight: '800',
   },
   sectionTitle: {
@@ -5154,6 +5587,23 @@ const styles = StyleSheet.create({
     height: DEFAULT_PHOTO_PAIR_HEIGHT,
     overflow: 'hidden',
     width: '100%',
+  },
+  todayCaptionRow: {
+    flexDirection: 'row',
+    paddingBottom: 2,
+    paddingTop: 10,
+  },
+  todayCaptionCell: {
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 8,
+  },
+  todayCaptionText: {
+    color: '#666666',
+    fontSize: 12,
+    fontWeight: '500',
+    lineHeight: 17,
+    textAlign: 'center',
   },
   loadingMetaLine: {
     backgroundColor: '#ECE8E1',
@@ -5591,6 +6041,12 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '800',
   },
+  fullPhotoCaption: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '500',
+    lineHeight: 22,
+  },
   fullMission: {
     color: '#D8D8D8',
     fontSize: 15,
@@ -5633,6 +6089,11 @@ const styles = StyleSheet.create({
   allDropsContent: {
     gap: 10,
     padding: 20,
+  },
+  allDropsDescription: {
+    color: '#777777',
+    fontSize: 13,
+    lineHeight: 19,
   },
   allDropRow: {
     alignItems: 'center',

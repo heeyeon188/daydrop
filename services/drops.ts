@@ -11,8 +11,8 @@ import {
 } from '@/services/storage';
 import type { DropSubmission, PartnerType, RecentDrop, TodayDropPayload } from '@/types/daydrop';
 
-const RECENT_DROPS_LIMIT = 10;
-const RECENT_DROPS_QUERY_LIMIT = 30;
+const RECENT_DROPS_LIMIT = 15;
+const RECENT_DROPS_QUERY_LIMIT = 45;
 
 type RecentDropSigningMode = 'display' | 'thumbnail';
 
@@ -34,6 +34,7 @@ export async function getOrCreateTodayDrop(): Promise<TodayDropPayload> {
 
 export async function submitDropPhoto({
   base64,
+  caption,
   coupleId,
   dropId,
   fileInfo,
@@ -42,6 +43,7 @@ export async function submitDropPhoto({
   userId,
 }: {
   base64?: string | null;
+  caption?: string | null;
   coupleId?: string | null;
   dropId: string;
   fileInfo?: DropImageFileInfo & { uri: string };
@@ -52,6 +54,8 @@ export async function submitDropPhoto({
   if (!coupleId) {
     throw new Error('missing_couple_id');
   }
+
+  const note = normalizeDropCaption(caption);
 
   if (__DEV__) {
     console.log('[photo] submit drop photo', {
@@ -98,6 +102,7 @@ export async function submitDropPhoto({
           display_image_url: null,
           display_storage_path: null,
           image_url: uploaded.imageUrl,
+          note,
           storage_path: uploaded.storagePath,
           thumbnail_image_url: null,
           thumbnail_storage_path: null,
@@ -149,6 +154,18 @@ export async function submitDropPhoto({
   });
 
   return data as DropSubmission;
+}
+
+function normalizeDropCaption(caption?: string | null) {
+  const normalized = caption
+    ?.replace(/\r\n?/g, '\n')
+    .split('\n')
+    .slice(0, 2)
+    .join('\n')
+    .slice(0, 60)
+    .trim();
+
+  return normalized || null;
 }
 
 async function uploadAndAttachOptimizedImages({
@@ -493,9 +510,11 @@ async function signSubmissionUrls<
     submissions.map((submission) => {
       const displayPath = submission.display_storage_path?.trim();
       const thumbnailPath = submission.thumbnail_storage_path?.trim();
-      const shouldSignDisplay = options.usage === 'display' && Boolean(displayPath);
-      const shouldSignThumbnail = Boolean(thumbnailPath);
-      const shouldSignOriginal = options.usage === 'thumbnail' ? !thumbnailPath : !displayPath && !thumbnailPath;
+      const shouldSignDisplay =
+        options.usage === 'display' ? Boolean(displayPath) : !thumbnailPath && Boolean(displayPath);
+      const shouldSignThumbnail =
+        options.usage === 'thumbnail' ? Boolean(thumbnailPath) : !displayPath && Boolean(thumbnailPath);
+      const shouldSignOriginal = !displayPath && !thumbnailPath;
 
       if (!shouldSignOriginal && !shouldSignDisplay && !shouldSignThumbnail) {
         return submission;
